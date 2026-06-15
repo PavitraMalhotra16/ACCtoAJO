@@ -3,13 +3,9 @@ import xml.etree.ElementTree as ET
 
 ACC_SOAP_URL = "http://localhost:8080/nl/jsp/soaprouter.jsp"
 
-SOAP_NS = {
-    "soapenv": "http://schemas.xmlsoap.org/soap/envelope/",
-    "urn": "urn:xtk:session",
-}
 
-
-def logon(login: str, password: str) -> str:
+def logon(login: str, password: str) -> tuple[str, str]:
+    """Returns (session_token, security_token)."""
     envelope = f"""<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:urn="urn:xtk:session">
   <soapenv:Header/>
   <soapenv:Body>
@@ -32,23 +28,27 @@ def logon(login: str, password: str) -> str:
 
     root = ET.fromstring(response.text)
 
-    # Check for SOAP fault
     fault = root.find(".//{http://schemas.xmlsoap.org/soap/envelope/}Fault")
     if fault is not None:
         fault_string = fault.findtext("faultstring") or "Unknown SOAP fault"
         raise ValueError(f"SOAP fault: {fault_string}")
 
-    # Extract session token
-    token_el = root.find(".//{urn:xtk:session}pstrSessionToken")
-    if token_el is None:
+    session_token_el = root.find(".//{urn:xtk:session}pstrSessionToken")
+    if session_token_el is None:
         raise ValueError("No session token returned from ACC SOAP Logon")
 
-    return token_el.text or ""
+    security_token_el = root.find(".//{urn:xtk:session}pstrSecurityToken")
+    security_token = security_token_el.text if security_token_el is not None else ""
+
+    return (session_token_el.text or "", security_token or "")
 
 
-def get_schemas(session_token: str) -> list[dict]:
+def get_schemas(session_token: str, security_token: str) -> list[dict]:
     envelope = f"""<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:urn="urn:xtk:queryDef">
-  <soapenv:Header/>
+  <soapenv:Header>
+    <Cookie xmlns="urn:xtk:session">__sessiontoken={session_token}</Cookie>
+    <X-Security-Token xmlns="urn:xtk:session">{security_token}</X-Security-Token>
+  </soapenv:Header>
   <soapenv:Body>
     <urn:ExecuteQuery>
       <urn:sessiontoken>{session_token}</urn:sessiontoken>
@@ -76,14 +76,12 @@ def get_schemas(session_token: str) -> list[dict]:
 
     root = ET.fromstring(response.text)
 
-    # Check for SOAP fault
     fault = root.find(".//{http://schemas.xmlsoap.org/soap/envelope/}Fault")
     if fault is not None:
         fault_string = fault.findtext("faultstring") or "Unknown SOAP fault"
         raise ValueError(f"SOAP fault: {fault_string}")
 
     schemas = []
-    # Schema elements are returned as <schema> elements inside the response
     for schema_el in root.iter("schema"):
         schemas.append(
             {

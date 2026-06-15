@@ -24,13 +24,13 @@ def _get_acc_config(db: Session) -> Config | None:
 @router.post("/connect")
 def connect_acc(body: AccConnectRequest, db: Session = Depends(get_db)):
     try:
-        session_token = logon(body.login, body.password)
+        session_token, security_token = logon(body.login, body.password)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to connect to ACC: {str(e)}")
 
-    config_data = {"session_token": session_token, "login": body.login}
+    config_data = {"session_token": session_token, "security_token": security_token, "login": body.login}
 
     existing = _get_acc_config(db)
     if existing:
@@ -58,11 +58,12 @@ def list_schemas(db: Session = Depends(get_db)):
 
     config_data = json.loads(config.config_json)
     session_token = config_data.get("session_token")
+    security_token = config_data.get("security_token", "")
     if not session_token:
         raise HTTPException(status_code=400, detail="ACC not configured")
 
     try:
-        schemas = get_schemas(session_token)
+        schemas = get_schemas(session_token, security_token)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
