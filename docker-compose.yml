@@ -1,23 +1,20 @@
-version: '3.9'
 services:
   backend:
     build: ./backend
     ports:
       - "8000:8000"
     volumes:
-      - ./backend:/app
-      - ./data:/data
-    env_file: .env
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      - ./data:/app/data
+    environment:
+      - DATABASE_URL=sqlite:///./data/acc2ajo.db
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   frontend:
     build: ./frontend
     ports:
       - "5173:5173"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-    environment:
-      - VITE_BACKEND_URL=http://backend:8000
     depends_on:
       - backend
+    environment:
+      - VITE_API_URL=http://backend:8000
