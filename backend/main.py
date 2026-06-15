@@ -1,315 +1,372 @@
-"""
-Adobe Campaign Classic → AJO  –  FastAPI backend.
-
-Routes consumed by the React frontend (proxied via Vite /api → :8000):
-  POST /api/acc/connect       ACC SOAP Logon + TestCnx
-  GET  /api/acc/status        is there a live ACC session?
-  GET  /api/acc/schemas       list xtk:schema entries from ACC
-  POST /api/ajo/connect       IMS OAuth2 for AJO
-  GET  /api/ajo/status        is there a live AJO token?
-  GET  /health
-"""
-
 import logging
-import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
-from fastapi import Cookie, FastAPI, HTTPException, Response
+from cryptography.fernet import Fernet
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from datetime import timedelta
 
 from acc_soap import (
+    build_list_schemas_envelope,
     build_logon_envelope,
     build_test_cnx_envelope,
-    build_list_schemas_envelope,
-    parse_logon_response,
     parse_fault,
+    parse_logon_response,
     parse_schemas,
 )
-from config import settings
-from session_store import SessionStore
+from db import DestinationConnection, SourceConnection, UserSession, get_db, init_db, AsyncSessionLocal
 
-# ---------------------------------------------------------------------------
-# Logging  (never log secrets)
-# ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.DEBUG if settings.debug else logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("acc_backend")
 
-# ---------------------------------------------------------------------------
-# Stores
-# ---------------------------------------------------------------------------
-acc_store = SessionStore()   # session_id → { session_token, security_token }
+ACC_ENDPOINT = "http://127.0.0.1:8080/nl/jsp/soaprouter.jsp"
+CORS_ORIGINS = ["http://localhost:3000", "http://localhost:5173"]
 
-# AJO state (single-user in-memory; swap for Redis in production)
-_ajo_state: dict = {
-    "connected": False,
-    "org_id": None,
-    "sandbox_name": None,
-    "access_token": None,
-    "expires_at": 0.0,
-}
+# Encryption key – in production load from environment variable
+import os
+_key = os.getenv("ENCRYPTION_KEY")
+if not _key:
+    raise RuntimeError("ENCRYPTION_KEY not set in .env – run: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"")
+fernet = Fernet(_key.encode())
+
+SESSION_TTL_DAYS = 7
+USER_COOKIE_TTL_DAYS = 365  # long-lived identity cookie
 
 
-# ---------------------------------------------------------------------------
-# App lifecycle
-# ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("Backend starting – ACC endpoint: %s", settings.acc_endpoint)
+    await init_db()
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(UserSession).where(UserSession.expires_at < datetime.now(timezone.utc))
+        )
+        expired = result.scalars().all()
+        for s in expired:
+            await db.delete(s)
+        await db.commit()
+        if expired:
+            log.info("Cleaned up %d expired session(s)", len(expired))
+    log.info("DB tables ready")
     yield
-    log.info("Backend shutting down")
 
 
-app = FastAPI(title="ACC→AJO Backend", version="1.0.0", lifespan=lifespan)
-
+app = FastAPI(title="ACC→AJO Backend", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# ---------------------------------------------------------------------------
-# Schemas (Pydantic)
-# ---------------------------------------------------------------------------
-class AccConnectRequest(BaseModel):
-    login: str
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def encrypt(value: str) -> str:
+    return fernet.encrypt(value.encode()).decode()
+
+
+async def get_login_from_cookie(
+    acc_session: Optional[str],
+    db: AsyncSession,
+    acc_user: Optional[str] = None,
+) -> Optional[str]:
+    # 1. Try short-lived session cookie first
+    if acc_session:
+        result = await db.execute(
+            select(UserSession).where(
+                UserSession.id == acc_session,
+                UserSession.expires_at > datetime.now(timezone.utc),
+            )
+        )
+        session = result.scalar_one_or_none()
+        if session:
+            return session.login_id
+
+    # 2. Session missing/expired – fall back to long-lived identity cookie
+    if acc_user:
+        result = await db.execute(
+            select(SourceConnection).where(
+                SourceConnection.login_id == acc_user,
+                SourceConnection.authenticated == True,
+            )
+        )
+        conn = result.scalar_one_or_none()
+        if conn:
+            log.info("Auto-restored session from DB for loginId=%s", acc_user)
+            return acc_user
+
+    return None
+
+
+# ── Schemas ──────────────────────────────────────────────────────────────────
+
+class AccLoginRequest(BaseModel):
+    loginId: str
     password: str
 
 
-class AjoConnectRequest(BaseModel):
-    org_id: str
-    client_id: str
-    client_secret: str
-    sandbox_name: str
+class AjoLoginRequest(BaseModel):
+    orgId: str
+    clientId: str
+    clientSecret: str
+    sandboxName: str
 
 
-# ---------------------------------------------------------------------------
-# Helper – resolve ACC session from cookie
-# ---------------------------------------------------------------------------
-def _require_acc_session(acc_session: Optional[str]) -> dict:
-    if not acc_session:
-        raise HTTPException(401, "Not authenticated – call /api/acc/connect first")
-    tokens = acc_store.get(acc_session)
-    if not tokens:
-        raise HTTPException(401, "Session expired – please reconnect")
-    return tokens
+# ── Routes ───────────────────────────────────────────────────────────────────
 
+@app.post("/api/source/authenticate")
+async def source_authenticate(
+    body: AccLoginRequest,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    log.info("ACC login attempt – loginId=%s", body.loginId)
 
-# ===========================================================================
-# ACC routes
-# ===========================================================================
-
-@app.post("/api/acc/connect")
-async def acc_connect(body: AccConnectRequest, response: Response):
-    """
-    1. SOAP Logon with credentials.
-    2. Parse session + security tokens.
-    3. SOAP TestCnx to verify session is live.
-    4. Store tokens server-side; return opaque session cookie.
-    """
-    log.info("ACC connect attempt – login=%s", body.login)
-
-    async with httpx.AsyncClient(timeout=settings.soap_timeout) as client:
-
-        # ── Logon ────────────────────────────────────────────────────────────
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # Logon
         try:
-            logon_resp = await client.post(
-                settings.acc_endpoint,
-                content=build_logon_envelope(body.login, body.password),
-                headers={
-                    "Content-Type": "text/xml; charset=utf-8",
-                    "SOAPAction": "xtk:session#Logon",
-                },
+            logon = await client.post(
+                ACC_ENDPOINT,
+                content=build_logon_envelope(body.loginId, body.password),
+                headers={"Content-Type": "text/xml; charset=utf-8", "SOAPAction": "xtk:session#Logon"},
             )
-        except httpx.RequestError as exc:
-            log.error("Network error reaching ACC: %s", exc)
+        except httpx.RequestError:
             raise HTTPException(502, "Cannot reach Adobe Campaign Classic")
 
-        if logon_resp.status_code != 200:
-            fault = parse_fault(logon_resp.text)
-            raise HTTPException(401, fault or "Logon failed")
+        if logon.status_code != 200:
+            raise HTTPException(401, parse_fault(logon.text) or "Logon failed")
 
-        session_token, security_token = parse_logon_response(logon_resp.text)
-        if not session_token or not security_token:
-            fault = parse_fault(logon_resp.text)
-            raise HTTPException(401, fault or "Authentication failed: tokens missing")
+        session_token, security_token = parse_logon_response(logon.text)
+        if not session_token:
+            raise HTTPException(401, parse_fault(logon.text) or "Authentication failed")
 
-        log.info("ACC Logon succeeded – login=%s", body.login)
+        # TestCnx
+        test = await client.post(
+            ACC_ENDPOINT,
+            content=build_test_cnx_envelope(session_token, security_token),
+            headers={
+                "Content-Type": "text/xml; charset=utf-8",
+                "SOAPAction": "xtk:session#TestCnx",
+                "Cookie": f"__sessiontoken={session_token}",
+                "X-Security-Token": security_token,
+            },
+        )
+        if parse_fault(test.text):
+            raise HTTPException(401, parse_fault(test.text))
 
-        # ── TestCnx ──────────────────────────────────────────────────────────
-        try:
-            test_resp = await client.post(
-                settings.acc_endpoint,
-                content=build_test_cnx_envelope(session_token, security_token),
-                headers={
-                    "Content-Type": "text/xml; charset=utf-8",
-                    "SOAPAction": "xtk:session#TestCnx",
-                    "Cookie": f"__sessiontoken={session_token}",
-                    "X-Security-Token": security_token,
-                },
-            )
-        except httpx.RequestError as exc:
-            log.error("Network error during TestCnx: %s", exc)
-            raise HTTPException(502, "Cannot reach Adobe Campaign Classic")
+    # Save to DB
+    result = await db.execute(select(SourceConnection).where(SourceConnection.login_id == body.loginId))
+    conn = result.scalar_one_or_none()
+    now = datetime.now(timezone.utc)
 
-        if test_resp.status_code != 200:
-            fault = parse_fault(test_resp.text)
-            raise HTTPException(401, fault or "Session verification failed")
+    if conn:
+        conn.encrypted_password = encrypt(body.password)
+        conn.session_token = session_token
+        conn.security_token = security_token
+        conn.authenticated = True
+        conn.last_authenticated_at = now
+    else:
+        conn = SourceConnection(
+            login_id=body.loginId,
+            encrypted_password=encrypt(body.password),
+            session_token=session_token,
+            security_token=security_token,
+            authenticated=True,
+            last_authenticated_at=now,
+        )
+        db.add(conn)
 
-        fault = parse_fault(test_resp.text)
-        if fault:
-            raise HTTPException(401, fault)
-
-    # ── Store & respond ──────────────────────────────────────────────────────
+    # Create DB-backed session
     session_id = str(uuid.uuid4())
-    acc_store.set(session_id, session_token=session_token, security_token=security_token,
-                  login=body.login)
-
+    db.add(UserSession(
+        id=session_id,
+        login_id=body.loginId,
+        expires_at=datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS),
+    ))
+    # Short-lived session cookie (7 days)
     response.set_cookie(
-        key="acc_session",
-        value=session_id,
-        httponly=True,
-        samesite="lax",
-        secure=not settings.debug,
+        key="acc_session", value=session_id,
+        httponly=True, samesite="lax",
+        max_age=SESSION_TTL_DAYS * 24 * 3600,
+    )
+    # Long-lived identity cookie (1 year) – lets backend skip login on return visits
+    response.set_cookie(
+        key="acc_user", value=body.loginId,
+        httponly=True, samesite="lax",
+        max_age=USER_COOKIE_TTL_DAYS * 24 * 3600,
     )
 
-    log.info("ACC session stored – session_id=%s login=%s", session_id, body.login)
-    return {"connected": True, "login": body.login}
+    log.info("ACC authenticated – loginId=%s", body.loginId)
+    return {"success": True, "authenticated": True}
 
 
-@app.get("/api/acc/status")
-async def acc_status(acc_session: Optional[str] = Cookie(default=None)):
-    entry = acc_store.get(acc_session) if acc_session else None
-    if entry:
-        return {"connected": True, "login": entry.get("login")}
-    return {"connected": False, "login": None}
+@app.post("/api/destination/authenticate")
+async def destination_authenticate(
+    body: AjoLoginRequest,
+    acc_session: Optional[str] = Cookie(default=None),
+    acc_user: Optional[str] = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    login_id = await get_login_from_cookie(acc_session, db, acc_user)
+    if not login_id:
+        raise HTTPException(401, "Authenticate source first")
 
-
-@app.get("/api/acc/schemas")
-async def acc_schemas(acc_session: Optional[str] = Cookie(default=None)):
-    tokens = _require_acc_session(acc_session)
-
-    async with httpx.AsyncClient(timeout=settings.soap_timeout) as client:
-        try:
-            resp = await client.post(
-                settings.acc_endpoint,
-                content=build_list_schemas_envelope(
-                    tokens["session_token"], tokens["security_token"]
-                ),
-                headers={
-                    "Content-Type": "text/xml; charset=utf-8",
-                    "SOAPAction": "xtk:queryDef#ExecuteQuery",
-                    "Cookie": f"__sessiontoken={tokens['session_token']}",
-                    "X-Security-Token": tokens["security_token"],
-                },
-            )
-        except httpx.RequestError as exc:
-            log.error("Network error fetching schemas: %s", exc)
-            raise HTTPException(502, "Cannot reach Adobe Campaign Classic")
-
-    if resp.status_code != 200:
-        fault = parse_fault(resp.text)
-        raise HTTPException(502, fault or "Failed to fetch schemas")
-
-    fault = parse_fault(resp.text)
-    if fault:
-        raise HTTPException(502, fault)
-
-    schemas = parse_schemas(resp.text)
-    log.info("Fetched %d schemas from ACC", len(schemas))
-    return {"schemas": schemas}
-
-
-# ===========================================================================
-# AJO routes  (IMS OAuth 2.0 – service account / client-credentials flow)
-# ===========================================================================
-
-@app.post("/api/ajo/connect")
-async def ajo_connect(body: AjoConnectRequest):
-    """
-    Authenticate against Adobe IMS using client-credentials grant.
-    Stores the access token server-side.
-    """
-    log.info("AJO connect attempt – org_id=%s sandbox=%s", body.org_id, body.sandbox_name)
-
-    ims_url = "https://ims-na1.adobelogin.com/ims/token/v3"
+    log.info("AJO login attempt – orgId=%s", body.orgId)
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             token_resp = await client.post(
-                ims_url,
+                "https://ims-na1.adobelogin.com/ims/token/v3",
                 data={
                     "grant_type": "client_credentials",
-                    "client_id": body.client_id,
-                    "client_secret": body.client_secret,
-                    "scope": "openid,AdobeID,read_organizations,additional_info.projectedProductContext",
+                    "client_id": body.clientId,
+                    "client_secret": body.clientSecret,
+                    "scope": "openid,AdobeID,read_organizations",
                 },
             )
-        except httpx.RequestError as exc:
-            log.error("Network error reaching IMS: %s", exc)
+        except httpx.RequestError:
             raise HTTPException(502, "Cannot reach Adobe IMS")
 
     if token_resp.status_code != 200:
-        log.warning("IMS token error: %s", token_resp.text[:200])
         raise HTTPException(401, "AJO authentication failed – check credentials")
 
-    token_data = token_resp.json()
-    access_token = token_data.get("access_token")
-    expires_in = token_data.get("expires_in", 3600)
-
+    access_token = token_resp.json().get("access_token")
     if not access_token:
         raise HTTPException(401, "IMS did not return an access token")
 
-    _ajo_state.update({
-        "connected": True,
-        "org_id": body.org_id,
-        "sandbox_name": body.sandbox_name,
-        "access_token": access_token,
-        "expires_at": time.monotonic() + expires_in,
-    })
+    # Save to DB
+    result = await db.execute(select(DestinationConnection).where(DestinationConnection.org_id == body.orgId))
+    conn = result.scalar_one_or_none()
+    now = datetime.now(timezone.utc)
 
-    log.info("AJO connected – org_id=%s", body.org_id)
-    return {"connected": True, "org_id": body.org_id, "sandbox_name": body.sandbox_name}
+    encrypted = encrypt(f"{body.clientId}:{body.clientSecret}")
+    if conn:
+        conn.client_id = body.clientId
+        conn.sandbox_name = body.sandboxName
+        conn.encrypted_credentials = encrypted
+        conn.authenticated = True
+        conn.last_authenticated_at = now
+    else:
+        conn = DestinationConnection(
+            org_id=body.orgId,
+            client_id=body.clientId,
+            sandbox_name=body.sandboxName,
+            encrypted_credentials=encrypted,
+            authenticated=True,
+            last_authenticated_at=now,
+        )
+        db.add(conn)
+
+    log.info("AJO authenticated – orgId=%s", body.orgId)
+    return {"success": True, "authenticated": True}
 
 
-@app.get("/api/ajo/status")
-async def ajo_status():
-    alive = (
-        _ajo_state["connected"]
-        and _ajo_state["access_token"] is not None
-        and time.monotonic() < _ajo_state["expires_at"]
-    )
-    if alive:
-        return {
-            "connected": True,
-            "org_id": _ajo_state["org_id"],
-            "sandbox_name": _ajo_state["sandbox_name"],
-        }
-    return {"connected": False, "org_id": None, "sandbox_name": None}
+@app.get("/api/connections/status")
+async def connections_status(
+    acc_session: Optional[str] = Cookie(default=None),
+    acc_user: Optional[str] = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    login_id = await get_login_from_cookie(acc_session, db, acc_user)
+
+    src = None
+    dst = None
+
+    if login_id:
+        result = await db.execute(
+            select(SourceConnection).where(
+                SourceConnection.login_id == login_id,
+                SourceConnection.authenticated == True,
+            )
+        )
+        src = result.scalar_one_or_none()
+
+        if src:
+            result = await db.execute(
+                select(DestinationConnection).where(DestinationConnection.authenticated == True)
+            )
+            dst = result.scalar_one_or_none()
+
+    return {
+        "sourceAuthenticated": src is not None,
+        "destinationAuthenticated": dst is not None,
+        "sourceLoginId": src.login_id if src else None,
+        "destinationOrgId": dst.org_id if dst else None,
+        "destinationSandboxName": dst.sandbox_name if dst else None,
+    }
 
 
-# ===========================================================================
-# Health
-# ===========================================================================
+@app.get("/api/acc/schemas")
+async def acc_schemas(
+    acc_session: Optional[str] = Cookie(default=None),
+    acc_user: Optional[str] = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    login_id = await get_login_from_cookie(acc_session, db, acc_user)
+    if not login_id:
+        raise HTTPException(401, "Not authenticated")
+
+    result = await db.execute(select(SourceConnection).where(SourceConnection.login_id == login_id))
+    conn = result.scalar_one_or_none()
+    if not conn:
+        raise HTTPException(401, "Source not found")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            ACC_ENDPOINT,
+            content=build_list_schemas_envelope(conn.session_token, conn.security_token),
+            headers={
+                "Content-Type": "text/xml; charset=utf-8",
+                "SOAPAction": "xtk:queryDef#ExecuteQuery",
+                "Cookie": f"__sessiontoken={conn.session_token}",
+                "X-Security-Token": conn.security_token,
+            },
+        )
+
+    schemas = parse_schemas(resp.text)
+    if not schemas:
+        log.warning("No schemas parsed – raw response: %s", resp.text[:1000])
+    return {"schemas": schemas}
+
+
+@app.get("/debug/schemas-raw")
+async def schemas_raw(
+    acc_session: Optional[str] = Cookie(default=None),
+    acc_user: Optional[str] = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    login_id = await get_login_from_cookie(acc_session, db, acc_user)
+    if not login_id:
+        raise HTTPException(401, "Not authenticated")
+
+    result = await db.execute(select(SourceConnection).where(SourceConnection.login_id == login_id))
+    conn = result.scalar_one_or_none()
+    if not conn:
+        raise HTTPException(401, "Source not found")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            ACC_ENDPOINT,
+            content=build_list_schemas_envelope(conn.session_token, conn.security_token),
+            headers={
+                "Content-Type": "text/xml; charset=utf-8",
+                "SOAPAction": "xtk:queryDef#ExecuteQuery",
+                "Cookie": f"__sessiontoken={conn.session_token}",
+                "X-Security-Token": conn.security_token,
+            },
+        )
+    return {"status": resp.status_code, "raw_xml": resp.text}
+
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
-
-
-# ===========================================================================
-# Legacy endpoint (kept for backward-compat / direct curl testing)
-# ===========================================================================
-
-@app.post("/login")
-async def login_legacy(body: AccConnectRequest, response: Response):
-    return await acc_connect(body, response)

@@ -239,7 +239,6 @@ def build_list_schemas_envelope(session_token: str, security_token: str) -> byte
         '<node expr="@namespace"/>'
         '<node expr="@name"/>'
         '<node expr="@label"/>'
-        '<node expr="@labelSingular"/>'
         "</select>"
         "<where>"
         '<condition expr="@namespace != \'xtk\' and @name != \'\'"/>'
@@ -258,7 +257,13 @@ def parse_schemas(xml_text: str) -> list[dict]:
     """
     Parse the ExecuteQuery response for xtk:schema into a list of dicts:
       [{ namespace, name, label, labelSingular }, ...]
+
+    ACC can return schemas in two formats:
+      1. <schema namespace="nms" name="recipient" label="..." />  (attributes)
+      2. <schema><namespace>nms</namespace><name>recipient</name>...</schema> (child elements)
     """
+    log.debug("Raw schemas response (first 500 chars): %s", xml_text[:500])
+
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError as exc:
@@ -266,20 +271,28 @@ def parse_schemas(xml_text: str) -> list[dict]:
         return []
 
     results = []
-    # ACC wraps rows in <schema .../> elements inside the response collection
+
     for el in root.iter():
-        if el.tag in ("schema", "{urn:xtk:schema}schema") or el.tag.endswith("}schema"):
-            ns = el.get("namespace") or el.get("@namespace", "")
-            name = el.get("name") or el.get("@name", "")
-            label = el.get("label") or el.get("@label", "")
-            label_singular = el.get("labelSingular") or el.get("@labelSingular", "")
-            if name:
-                results.append({
-                    "namespace": ns,
-                    "name": name,
-                    "label": label,
-                    "labelSingular": label_singular,
-                })
+        # Strip namespace prefix e.g. {urn:xtk:queryDef}schema → schema
+        local_tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+
+        if local_tag != "schema":
+            continue
+
+        # ACC returns attributes directly: <schema namespace="nms" name="recipient" label="..."/>
+        ns    = el.get("namespace", "")
+        name  = el.get("name", "")
+        label = el.get("label", "") or el.get("_cs", "")  # _cs is the computed string label
+
+        if name:
+            results.append({
+                "namespace": ns,
+                "name": name,
+                "label": label or name,
+                "labelSingular": label or name,
+            })
+
+    log.info("Parsed %d schemas from ACC response", len(results))
     return results
 
 
