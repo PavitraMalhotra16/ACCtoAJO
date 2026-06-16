@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AJO User Validation</title>
+  <style>
+    :root { --bg:#0f1115; --card:#1a1d24; --border:#2a2f3a; --accent:#e34850; --ok:#2ecc71; --text:#e8eaed; --muted:#9aa0a6; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg); color: var(--text); padding: 24px;
+    }
+    .card {
+      width: 100%; max-width: 480px; background: var(--card);
+      border: 1px solid var(--border); border-radius: 12px; padding: 28px 28px 24px;
+    }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    p.sub { margin: 0 0 20px; color: var(--muted); font-size: 13px; }
+    label { display: block; font-size: 13px; margin: 14px 0 6px; }
+    input {
+      width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+      background: #12151b; color: var(--text); font-size: 14px; font-family: inherit;
+    }
+    input:focus { outline: none; border-color: var(--accent); }
+    button {
+      margin-top: 22px; width: 100%; padding: 12px; border: none; border-radius: 8px;
+      background: var(--accent); color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
+    }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .result {
+      margin-top: 22px; padding: 14px; border-radius: 8px; display: none;
+      font-size: 15px; font-weight: 600; text-align: center;
+    }
+    .result.show { display: block; }
+    .result.ok    { background: rgba(46,204,113,0.12); border: 1px solid var(--ok); color: #8af0b4; }
+    .result.bad   { background: rgba(227,72,80,0.12);  border: 1px solid var(--accent); color: #ffb3b6; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>AJO User Validation</h1>
+    <p class="sub">Enter your Adobe credentials. The access token is generated and validated on the server — it is never shown here.</p>
+
+    <form id="form">
+      <label for="orgId">Org ID</label>
+      <input id="orgId" placeholder="XXXXXXXXXXXXXXXX@AdobeOrg" autocomplete="off" />
+
+      <label for="clientId">Client ID</label>
+      <input id="clientId" placeholder="Client ID (API key)" autocomplete="off" />
+
+      <label for="clientSecret">Client Secret</label>
+      <input id="clientSecret" type="password" placeholder="Client Secret" autocomplete="off" />
+
+      <button type="submit" id="submitBtn">Validate User</button>
+    </form>
+
+    <div class="result" id="result"></div>
+  </div>
+
+  <script>
+    // Backend base URL. Change if your FastAPI server runs elsewhere.
+    const API_BASE = "http://localhost:8000";
+
+    const form = document.getElementById("form");
+    const submitBtn = document.getElementById("submitBtn");
+    const resultBox = document.getElementById("result");
+
+    function showResult(ok, text) {
+      resultBox.textContent = text;
+      resultBox.className = "result show " + (ok ? "ok" : "bad");
+    }
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      resultBox.className = "result";
+      submitBtn.disabled = true;
+      submitBtn.textContent = "Validating…";
+
+      const body = {
+        ims_org_id: document.getElementById("orgId").value.trim() || null,
+        client_id: document.getElementById("clientId").value.trim() || null,
+        client_secret: document.getElementById("clientSecret").value.trim() || null,
+      };
+
+      try {
+        const resp = await fetch(`${API_BASE}/api/ajo/validate-user`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail);
+          showResult(false, "Error: " + (detail || `HTTP ${resp.status}`));
+          return;
+        }
+
+        // Backend returns { valid, message }. Never returns the token.
+        showResult(data.valid, data.valid ? "Valid user" : data.message);
+      } catch (err) {
+        showResult(false, "Error: " + err.message);
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Validate User";
+      }
+    });
+  </script>
+</body>
+</html>
