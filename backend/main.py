@@ -4,6 +4,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import httpx
 from cryptography.fernet import Fernet
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Response
