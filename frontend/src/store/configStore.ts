@@ -9,6 +9,7 @@ interface ConfigStore {
   setAccConnected: (login: string) => void
   setAccDisconnected: () => void
   setAjoConnected: (orgId: string, sandboxName: string) => void
+  setAjoDisconnected: () => void
 }
 
 export const useConfigStore = create<ConfigStore>((set) => ({
@@ -20,4 +21,5 @@ export const useConfigStore = create<ConfigStore>((set) => ({
   setAccConnected: (login) => set({ accConnected: true, accLogin: login }),
   setAccDisconnected: () => set({ accConnected: false, accLogin: null }),
   setAjoConnected: (orgId, sandboxName) => set({ ajoConnected: true, ajoOrgId: orgId, ajoSandboxName: sandboxName }),
+  setAjoDisconnected: () => set({ ajoConnected: false, ajoOrgId: null, ajoSandboxName: null }),
 }))
