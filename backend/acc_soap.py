@@ -23,27 +23,6 @@ NS = {
 # ---------------------------------------------------------------------------
 
 def build_logon_envelope(login_id: str, password: str) -> bytes:
-    """
-    Build the xtk:session#Logon SOAP envelope.
-
-    Exact envelope sent:
-
-        <?xml version="1.0" encoding="UTF-8"?>
-        <soapenv:Envelope
-            xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-            xmlns:urn="urn:xtk:session">
-          <soapenv:Header/>
-          <soapenv:Body>
-            <urn:Logon>
-              <urn:sessiontoken/>
-              <urn:strLogin>LOGIN_ID</urn:strLogin>
-              <urn:strPassword>PASSWORD</urn:strPassword>
-              <urn:elemParameters/>
-            </urn:Logon>
-          </soapenv:Body>
-        </soapenv:Envelope>
-    """
-    # Use manual string building to avoid any library silently stringifying creds
     envelope = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<soapenv:Envelope '
@@ -63,31 +42,27 @@ def build_logon_envelope(login_id: str, password: str) -> bytes:
     return envelope.encode("utf-8")
 
 
+def build_bearer_token_logon_envelope(ims_access_token: str) -> bytes:
+    """Build xtk:session#BearerTokenLogon — used for Technical Account (IMS) auth."""
+    envelope = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<soapenv:Envelope '
+        '    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
+        '    xmlns:urn="urn:xtk:session">'
+        "<soapenv:Header/>"
+        "<soapenv:Body>"
+        "<urn:BearerTokenLogon>"
+        "<urn:sessiontoken/>"
+        f"<urn:strIMSAccessToken>{_xml_escape(ims_access_token)}</urn:strIMSAccessToken>"
+        "<urn:elemParameters/>"
+        "</urn:BearerTokenLogon>"
+        "</soapenv:Body>"
+        "</soapenv:Envelope>"
+    )
+    return envelope.encode("utf-8")
+
+
 def build_test_cnx_envelope(session_token: str, security_token: str) -> bytes:
-    """
-    Build the xtk:session#TestCnx SOAP envelope.
-
-    The tokens are placed in the SOAP header as ACC expects.
-
-    Exact envelope:
-
-        <?xml version="1.0" encoding="UTF-8"?>
-        <soapenv:Envelope
-            xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-            xmlns:urn="urn:xtk:session">
-          <soapenv:Header>
-            <urn:SecurityHeader>
-              <urn:sessiontoken>SESSION_TOKEN</urn:sessiontoken>
-              <urn:securityToken>SECURITY_TOKEN</urn:securityToken>
-            </urn:SecurityHeader>
-          </soapenv:Header>
-          <soapenv:Body>
-            <urn:TestCnx>
-              <urn:sessiontoken>SESSION_TOKEN</urn:sessiontoken>
-            </urn:TestCnx>
-          </soapenv:Body>
-        </soapenv:Envelope>
-    """
     envelope = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<soapenv:Envelope '
@@ -118,27 +93,6 @@ def build_execute_query_envelope(
     line_count: int = 100,
     start_line: int = 0,
 ) -> bytes:
-    """
-    Build an xtk:queryDef#ExecuteQuery envelope.
-
-    Example (nms:recipient, first 5 rows):
-
-        <urn:ExecuteQuery>
-          <urn:sessiontoken>SESSION_TOKEN</urn:sessiontoken>
-          <urn:entity>
-            <queryDef schema="nms:recipient" operation="select">
-              <select>
-                <node expr="@firstName"/>
-                <node expr="@lastName"/>
-                <node expr="@email"/>
-              </select>
-              <where>
-                <condition expr="@email != ''"/>
-              </where>
-            </queryDef>
-          </urn:entity>
-        </urn:ExecuteQuery>
-    """
     nodes = "".join(f'<node expr="{_xml_escape(f)}"/>' for f in fields)
     where_block = (
         f"<where><condition expr=\"{_xml_escape(where_condition)}\"/></where>"
@@ -175,50 +129,7 @@ def build_execute_query_envelope(
     return envelope.encode("utf-8")
 
 
-# ---------------------------------------------------------------------------
-# Response parsers
-# ---------------------------------------------------------------------------
-
-def parse_logon_response(xml_text: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Extract (session_token, security_token) from a successful Logon response.
-
-    Expected fragment:
-        <LogonResponse>
-          <pstrSessionToken>SESSION_TOKEN</pstrSessionToken>
-          <pstrSecurityToken>SECURITY_TOKEN</pstrSecurityToken>
-        </LogonResponse>
-    """
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError as exc:
-        log.error("Failed to parse Logon XML: %s", exc)
-        return None, None
-
-    session_token = _find_text(root, [
-        ".//{urn:xtk:session}pstrSessionToken",
-        ".//pstrSessionToken",
-    ])
-    security_token = _find_text(root, [
-        ".//{urn:xtk:session}pstrSecurityToken",
-        ".//pstrSecurityToken",
-    ])
-
-    # ACC sometimes returns tokens without a namespace prefix
-    if not session_token:
-        session_token = _find_text(root, [".//sessionToken", ".//SessionToken"])
-    if not security_token:
-        security_token = _find_text(root, [".//securityToken", ".//SecurityToken"])
-
-    return session_token, security_token
-
-
 def build_list_schemas_envelope(session_token: str, security_token: str) -> bytes:
-    """
-    Query all xtk:schema entries using xtk:queryDef#ExecuteQuery.
-
-    Returns schemas with @namespace, @name, @label, @labelSingular.
-    """
     envelope = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<soapenv:Envelope '
@@ -253,15 +164,100 @@ def build_list_schemas_envelope(session_token: str, security_token: str) -> byte
     return envelope.encode("utf-8")
 
 
-def parse_schemas(xml_text: str) -> list[dict]:
-    """
-    Parse the ExecuteQuery response for xtk:schema into a list of dicts:
-      [{ namespace, name, label, labelSingular }, ...]
+def build_get_schema_envelope(
+    session_token: str, security_token: str, namespace: str, name: str
+) -> bytes:
+    """Build xtk:schema#Get envelope to fetch full schema definition."""
+    schema_id = f"{_xml_escape(namespace)}:{_xml_escape(name)}"
+    envelope = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<soapenv:Envelope '
+        '    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
+        '    xmlns:urn="urn:xtk:schema">'
+        "<soapenv:Header>"
+        '<urn:SecurityHeader xmlns:urn="urn:xtk:session">'
+        f"<urn:sessiontoken>{_xml_escape(session_token)}</urn:sessiontoken>"
+        f"<urn:securityToken>{_xml_escape(security_token)}</urn:securityToken>"
+        "</urn:SecurityHeader>"
+        "</soapenv:Header>"
+        "<soapenv:Body>"
+        "<urn:Get>"
+        f"<urn:sessiontoken>{_xml_escape(session_token)}</urn:sessiontoken>"
+        f'<urn:strName>{schema_id}</urn:strName>'
+        "</urn:Get>"
+        "</soapenv:Body>"
+        "</soapenv:Envelope>"
+    )
+    return envelope.encode("utf-8")
 
-    ACC can return schemas in two formats:
-      1. <schema namespace="nms" name="recipient" label="..." />  (attributes)
-      2. <schema><namespace>nms</namespace><name>recipient</name>...</schema> (child elements)
-    """
+
+def build_srcschema_get_envelope(
+    session_token: str, security_token: str, namespace: str, name: str
+) -> bytes:
+    """Fallback: query xtk:srcSchema using ExecuteQuery to fetch schema XML."""
+    envelope = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<soapenv:Envelope '
+        '    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
+        '    xmlns:urn="urn:xtk:queryDef">'
+        "<soapenv:Header>"
+        '<urn:SecurityHeader xmlns:urn="urn:xtk:session">'
+        f"<urn:sessiontoken>{_xml_escape(session_token)}</urn:sessiontoken>"
+        f"<urn:securityToken>{_xml_escape(security_token)}</urn:securityToken>"
+        "</urn:SecurityHeader>"
+        "</soapenv:Header>"
+        "<soapenv:Body>"
+        "<urn:ExecuteQuery>"
+        f"<urn:sessiontoken>{_xml_escape(session_token)}</urn:sessiontoken>"
+        "<urn:entity>"
+        '<queryDef schema="xtk:srcSchema" operation="get">'
+        "<select>"
+        '<node expr="@namespace"/>'
+        '<node expr="@name"/>'
+        '<node expr="@label"/>'
+        '<node expr="@desc"/>'
+        "</select>"
+        "<where>"
+        f'<condition expr="@namespace = \'{_xml_escape(namespace)}\' and @name = \'{_xml_escape(name)}\'"/>'
+        "</where>"
+        "</queryDef>"
+        "</urn:entity>"
+        "</urn:ExecuteQuery>"
+        "</soapenv:Body>"
+        "</soapenv:Envelope>"
+    )
+    return envelope.encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Response parsers
+# ---------------------------------------------------------------------------
+
+def parse_logon_response(xml_text: str) -> Tuple[Optional[str], Optional[str]]:
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        log.error("Failed to parse Logon XML: %s", exc)
+        return None, None
+
+    session_token = _find_text(root, [
+        ".//{urn:xtk:session}pstrSessionToken",
+        ".//pstrSessionToken",
+    ])
+    security_token = _find_text(root, [
+        ".//{urn:xtk:session}pstrSecurityToken",
+        ".//pstrSecurityToken",
+    ])
+
+    if not session_token:
+        session_token = _find_text(root, [".//sessionToken", ".//SessionToken"])
+    if not security_token:
+        security_token = _find_text(root, [".//securityToken", ".//SecurityToken"])
+
+    return session_token, security_token
+
+
+def parse_schemas(xml_text: str) -> list[dict]:
     log.debug("Raw schemas response (first 500 chars): %s", xml_text[:500])
 
     try:
@@ -273,16 +269,14 @@ def parse_schemas(xml_text: str) -> list[dict]:
     results = []
 
     for el in root.iter():
-        # Strip namespace prefix e.g. {urn:xtk:queryDef}schema → schema
         local_tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
 
         if local_tag != "schema":
             continue
 
-        # ACC returns attributes directly: <schema namespace="nms" name="recipient" label="..."/>
         ns    = el.get("namespace", "")
         name  = el.get("name", "")
-        label = el.get("label", "") or el.get("_cs", "")  # _cs is the computed string label
+        label = el.get("label", "") or el.get("_cs", "")
 
         if name:
             results.append({
@@ -296,16 +290,71 @@ def parse_schemas(xml_text: str) -> list[dict]:
     return results
 
 
-def parse_fault(xml_text: str) -> Optional[str]:
-    """
-    Return the SOAP fault string if present, otherwise None.
+def parse_schema_detail(xml_text: str) -> dict:
+    """Parse a full schema XML response into a structured dict with attributes and elements."""
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        log.error("Failed to parse schema detail XML: %s", exc)
+        return {}
 
-    SOAP fault structure:
-        <soapenv:Fault>
-          <faultcode>...</faultcode>
-          <faultstring>Human-readable message</faultstring>
-        </soapenv:Fault>
-    """
+    # Find the schema element (may be nested in SOAP envelope)
+    schema_el = None
+    for el in root.iter():
+        local_tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+        if local_tag == "schema":
+            schema_el = el
+            break
+
+    if schema_el is None:
+        # Try srcSchema
+        for el in root.iter():
+            local_tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+            if local_tag == "srcSchema":
+                schema_el = el
+                break
+
+    if schema_el is None:
+        log.warning("No schema element found in response")
+        return {}
+
+    attributes = []
+    elements = []
+
+    for child in schema_el:
+        local_tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        if local_tag == "attribute":
+            attributes.append({
+                "name": child.get("name", ""),
+                "type": child.get("type", ""),
+                "label": child.get("label", "") or child.get("_cs", ""),
+                "length": child.get("length", ""),
+                "required": child.get("notNull", "false"),
+                "enum": child.get("enum", ""),
+                "desc": child.get("desc", ""),
+            })
+        elif local_tag == "element":
+            elements.append(_parse_element(child))
+
+    return {
+        "namespace": schema_el.get("namespace", ""),
+        "name": schema_el.get("name", ""),
+        "label": schema_el.get("label", "") or schema_el.get("_cs", ""),
+        "labelSingular": schema_el.get("labelSingular", ""),
+        "desc": schema_el.get("desc", ""),
+        "attributes": attributes,
+        "elements": elements,
+    }
+
+
+def _parse_element(el: ET.Element) -> dict:
+    local_tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+    attrs = {k: v for k, v in el.attrib.items()}
+    children = [_parse_element(child) for child in el]
+    return {"tag": local_tag, "attrs": attrs, "children": children}
+
+
+def parse_fault(xml_text: str) -> Optional[str]:
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
@@ -323,7 +372,6 @@ def parse_fault(xml_text: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _find_text(root: ET.Element, paths: list[str]) -> Optional[str]:
-    """Try each XPath in order; return the first non-empty text found."""
     for path in paths:
         el = root.find(path)
         if el is not None and el.text:
@@ -332,7 +380,6 @@ def _find_text(root: ET.Element, paths: list[str]) -> Optional[str]:
 
 
 def _xml_escape(value: str) -> str:
-    """Minimal XML escaping for attribute values and text content."""
     return (
         value
         .replace("&", "&amp;")

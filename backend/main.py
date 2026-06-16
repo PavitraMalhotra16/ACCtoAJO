@@ -1,13 +1,14 @@
 import logging
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
 load_dotenv()
 
 import httpx
+import os
 from cryptography.fernet import Fernet
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,14 +16,16 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from datetime import timedelta
-
 from acc_soap import (
+    build_bearer_token_logon_envelope,
+    build_get_schema_envelope,
     build_list_schemas_envelope,
     build_logon_envelope,
+    build_srcschema_get_envelope,
     build_test_cnx_envelope,
     parse_fault,
     parse_logon_response,
+    parse_schema_detail,
     parse_schemas,
 )
 from db import DestinationConnection, SourceConnection, UserSession, get_db, init_db, AsyncSessionLocal
@@ -30,18 +33,18 @@ from db import DestinationConnection, SourceConnection, UserSession, get_db, ini
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("acc_backend")
 
-ACC_ENDPOINT = "http://127.0.0.1:8080/nl/jsp/soaprouter.jsp"
-CORS_ORIGINS = ["http://localhost:3000", "http://localhost:5173"]
-
-# Encryption key – in production load from environment variable
-import os
 _key = os.getenv("ENCRYPTION_KEY")
 if not _key:
     raise RuntimeError("ENCRYPTION_KEY not set in .env – run: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"")
 fernet = Fernet(_key.encode())
 
+CORS_ORIGINS_RAW = os.getenv("CORS_ORIGINS_RAW", "http://localhost:3000,http://localhost:5173")
+CORS_ORIGINS = [o.strip() for o in CORS_ORIGINS_RAW.split(",") if o.strip()]
+SOAP_TIMEOUT = float(os.getenv("SOAP_TIMEOUT", "30.0"))
+IMS_TOKEN_URL = "https://ims-na1.adobelogin.com/ims/token/v3"
+IMS_SCOPES = "openid,AdobeID,read_organizations,additional_info.projectedProductContext,session"
 SESSION_TTL_DAYS = 7
-USER_COOKIE_TTL_DAYS = 365  # long-lived identity cookie
+USER_COOKIE_TTL_DAYS = 365
 
 
 @asynccontextmanager
@@ -77,12 +80,24 @@ def encrypt(value: str) -> str:
     return fernet.encrypt(value.encode()).decode()
 
 
+def _set_session_cookies(response: Response, session_id: str, login_id: str) -> None:
+    response.set_cookie(
+        key="acc_session", value=session_id,
+        httponly=True, samesite="lax",
+        max_age=SESSION_TTL_DAYS * 24 * 3600,
+    )
+    response.set_cookie(
+        key="acc_user", value=login_id,
+        httponly=True, samesite="lax",
+        max_age=USER_COOKIE_TTL_DAYS * 24 * 3600,
+    )
+
+
 async def get_login_from_cookie(
     acc_session: Optional[str],
     db: AsyncSession,
     acc_user: Optional[str] = None,
 ) -> Optional[str]:
-    # 1. Try short-lived session cookie first
     if acc_session:
         result = await db.execute(
             select(UserSession).where(
@@ -94,7 +109,6 @@ async def get_login_from_cookie(
         if session:
             return session.login_id
 
-    # 2. Session missing/expired – fall back to long-lived identity cookie
     if acc_user:
         result = await db.execute(
             select(SourceConnection).where(
@@ -110,18 +124,19 @@ async def get_login_from_cookie(
     return None
 
 
-# ── Schemas ──────────────────────────────────────────────────────────────────
+# ── Pydantic models ───────────────────────────────────────────────────────────
 
-class AccLoginRequest(BaseModel):
-    loginId: str
-    password: str
-
-
-class AjoLoginRequest(BaseModel):
-    orgId: str
-    clientId: str
-    clientSecret: str
-    sandboxName: str
+class AccConnectRequest(BaseModel):
+    auth_type: str = "classic"          # "classic" | "technical"
+    instance_url: str
+    # Classic fields
+    login: Optional[str] = None
+    password: Optional[str] = None
+    # Technical account (IMS) fields
+    org_id: Optional[str] = None
+    client_id: Optional[str] = None
+    client_secret: Optional[str] = None
+    scope: Optional[str] = None
 
 
 class AjoConnectRequest(BaseModel):
@@ -129,159 +144,220 @@ class AjoConnectRequest(BaseModel):
     client_id: str
     client_secret: str
     sandbox_name: str
+    reference_token: Optional[str] = None
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
 
-@app.post("/api/source/authenticate")
-async def source_authenticate(
-    body: AccLoginRequest,
+@app.post("/api/acc/connect")
+async def acc_connect(
+    body: AccConnectRequest,
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
-    log.info("ACC login attempt – loginId=%s", body.loginId)
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        # Logon
-        try:
-            logon = await client.post(
-                ACC_ENDPOINT,
-                content=build_logon_envelope(body.loginId, body.password),
-                headers={"Content-Type": "text/xml; charset=utf-8", "SOAPAction": "xtk:session#Logon"},
-            )
-        except httpx.RequestError:
-            raise HTTPException(502, "Cannot reach Adobe Campaign Classic")
-
-        if logon.status_code != 200:
-            raise HTTPException(401, parse_fault(logon.text) or "Logon failed")
-
-        session_token, security_token = parse_logon_response(logon.text)
-        if not session_token:
-            raise HTTPException(401, parse_fault(logon.text) or "Authentication failed")
-
-        # TestCnx
-        test = await client.post(
-            ACC_ENDPOINT,
-            content=build_test_cnx_envelope(session_token, security_token),
-            headers={
-                "Content-Type": "text/xml; charset=utf-8",
-                "SOAPAction": "xtk:session#TestCnx",
-                "Cookie": f"__sessiontoken={session_token}",
-                "X-Security-Token": security_token,
-            },
-        )
-        if parse_fault(test.text):
-            raise HTTPException(401, parse_fault(test.text))
-
-    # Save to DB
-    result = await db.execute(select(SourceConnection).where(SourceConnection.login_id == body.loginId))
-    conn = result.scalar_one_or_none()
+    soap_url = body.instance_url.rstrip("/") + "/nl/jsp/soaprouter.jsp"
     now = datetime.now(timezone.utc)
 
-    if conn:
-        conn.encrypted_password = encrypt(body.password)
-        conn.session_token = session_token
-        conn.security_token = security_token
-        conn.authenticated = True
-        conn.last_authenticated_at = now
-    else:
-        conn = SourceConnection(
-            login_id=body.loginId,
-            encrypted_password=encrypt(body.password),
-            session_token=session_token,
-            security_token=security_token,
-            authenticated=True,
-            last_authenticated_at=now,
-        )
-        db.add(conn)
+    async with httpx.AsyncClient(timeout=SOAP_TIMEOUT) as client:
+        if body.auth_type == "classic":
+            if not body.login or not body.password:
+                raise HTTPException(400, "login and password are required for classic auth")
 
-    # Create DB-backed session
+            log.info("ACC classic login – login=%s url=%s", body.login, soap_url)
+            try:
+                logon = await client.post(
+                    soap_url,
+                    content=build_logon_envelope(body.login, body.password),
+                    headers={"Content-Type": "text/xml; charset=utf-8", "SOAPAction": "xtk:session#Logon"},
+                )
+            except httpx.RequestError:
+                raise HTTPException(502, f"Cannot reach Campaign instance at {body.instance_url}")
+
+            fault = parse_fault(logon.text)
+            if fault:
+                raise HTTPException(401, fault)
+
+            session_token, security_token = parse_logon_response(logon.text)
+            if not session_token:
+                raise HTTPException(401, parse_fault(logon.text) or "Authentication failed – no session token")
+
+            # TestCnx to confirm
+            test = await client.post(
+                soap_url,
+                content=build_test_cnx_envelope(session_token, security_token),
+                headers={
+                    "Content-Type": "text/xml; charset=utf-8",
+                    "SOAPAction": "xtk:session#TestCnx",
+                    "Cookie": f"__sessiontoken={session_token}",
+                    "X-Security-Token": security_token,
+                },
+            )
+            if parse_fault(test.text):
+                raise HTTPException(401, parse_fault(test.text))
+
+            login_id = body.login
+            result = await db.execute(select(SourceConnection).where(SourceConnection.login_id == login_id))
+            conn = result.scalar_one_or_none()
+            if conn:
+                conn.auth_type = "classic"
+                conn.instance_url = body.instance_url
+                conn.encrypted_password = encrypt(body.password)
+                conn.session_token = session_token
+                conn.security_token = security_token
+                conn.authenticated = True
+                conn.last_authenticated_at = now
+            else:
+                conn = SourceConnection(
+                    login_id=login_id,
+                    auth_type="classic",
+                    instance_url=body.instance_url,
+                    encrypted_password=encrypt(body.password),
+                    session_token=session_token,
+                    security_token=security_token,
+                    authenticated=True,
+                    last_authenticated_at=now,
+                )
+                db.add(conn)
+
+        else:  # technical
+            if not body.client_id or not body.client_secret:
+                raise HTTPException(400, "client_id and client_secret are required for technical auth")
+
+            log.info("ACC technical account login – clientId=%s", body.client_id)
+            scope = body.scope or IMS_SCOPES
+            try:
+                token_resp = await client.post(
+                    IMS_TOKEN_URL,
+                    data={
+                        "grant_type": "client_credentials",
+                        "client_id": body.client_id,
+                        "client_secret": body.client_secret,
+                        "scope": scope,
+                    },
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+            except httpx.RequestError:
+                raise HTTPException(502, "Cannot reach Adobe IMS")
+
+            if token_resp.status_code != 200:
+                raise HTTPException(401, "IMS authentication failed – check client ID and secret")
+
+            ims_token = token_resp.json().get("access_token")
+            if not ims_token:
+                raise HTTPException(401, "IMS did not return an access token")
+
+            # BearerTokenLogon against ACC
+            try:
+                logon = await client.post(
+                    soap_url,
+                    content=build_bearer_token_logon_envelope(ims_token),
+                    headers={"Content-Type": "text/xml; charset=utf-8", "SOAPAction": "xtk:session#BearerTokenLogon"},
+                )
+            except httpx.RequestError:
+                raise HTTPException(502, f"Cannot reach Campaign instance at {body.instance_url}")
+
+            fault = parse_fault(logon.text)
+            if fault:
+                raise HTTPException(401, fault)
+
+            session_token, security_token = parse_logon_response(logon.text)
+            if not session_token:
+                raise HTTPException(401, "BearerTokenLogon did not return a session token")
+
+            login_id = body.client_id
+            result = await db.execute(select(SourceConnection).where(SourceConnection.login_id == login_id))
+            conn = result.scalar_one_or_none()
+            if conn:
+                conn.auth_type = "technical"
+                conn.instance_url = body.instance_url
+                conn.encrypted_client_secret = encrypt(body.client_secret)
+                conn.scope = scope
+                conn.session_token = session_token
+                conn.security_token = security_token
+                conn.authenticated = True
+                conn.last_authenticated_at = now
+            else:
+                conn = SourceConnection(
+                    login_id=login_id,
+                    auth_type="technical",
+                    instance_url=body.instance_url,
+                    encrypted_client_secret=encrypt(body.client_secret),
+                    scope=scope,
+                    session_token=session_token,
+                    security_token=security_token,
+                    authenticated=True,
+                    last_authenticated_at=now,
+                )
+                db.add(conn)
+
     session_id = str(uuid.uuid4())
     db.add(UserSession(
         id=session_id,
-        login_id=body.loginId,
-        expires_at=datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS),
+        login_id=login_id,
+        expires_at=now + timedelta(days=SESSION_TTL_DAYS),
     ))
-    # Short-lived session cookie (7 days)
-    response.set_cookie(
-        key="acc_session", value=session_id,
-        httponly=True, samesite="lax",
-        max_age=SESSION_TTL_DAYS * 24 * 3600,
-    )
-    # Long-lived identity cookie (1 year) – lets backend skip login on return visits
-    response.set_cookie(
-        key="acc_user", value=body.loginId,
-        httponly=True, samesite="lax",
-        max_age=USER_COOKIE_TTL_DAYS * 24 * 3600,
-    )
+    await db.flush()
+    _set_session_cookies(response, session_id, login_id)
 
-    log.info("ACC authenticated – loginId=%s", body.loginId)
-    return {"success": True, "authenticated": True}
+    log.info("ACC authenticated – loginId=%s auth_type=%s", login_id, body.auth_type)
+    return {"success": True, "login": login_id, "auth_type": body.auth_type}
 
 
-@app.post("/api/destination/authenticate")
-async def destination_authenticate(
-    body: AjoLoginRequest,
+@app.post("/api/acc/disconnect")
+async def acc_disconnect(
+    response: Response,
+    acc_session: Optional[str] = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    if acc_session:
+        result = await db.execute(select(UserSession).where(UserSession.id == acc_session))
+        session = result.scalar_one_or_none()
+        if session:
+            await db.delete(session)
+
+    response.delete_cookie("acc_session")
+    response.delete_cookie("acc_user")
+    return {"success": True}
+
+
+@app.get("/api/acc/status")
+async def acc_status(
+    response: Response,
     acc_session: Optional[str] = Cookie(default=None),
     acc_user: Optional[str] = Cookie(default=None),
     db: AsyncSession = Depends(get_db),
 ):
     login_id = await get_login_from_cookie(acc_session, db, acc_user)
+
+    # Auto-restore: if no cookie at all (new browser, same machine), pick last authenticated
     if not login_id:
-        raise HTTPException(401, "Authenticate source first")
-
-    log.info("AJO login attempt – orgId=%s", body.orgId)
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            token_resp = await client.post(
-                "https://ims-na1.adobelogin.com/ims/token/v3",
-                data={
-                    "grant_type": "client_credentials",
-                    "client_id": body.clientId,
-                    "client_secret": body.clientSecret,
-                    "scope": "openid,AdobeID,read_organizations",
-                },
-            )
-        except httpx.RequestError:
-            raise HTTPException(502, "Cannot reach Adobe IMS")
-
-    if token_resp.status_code != 200:
-        raise HTTPException(401, "AJO authentication failed – check credentials")
-
-    access_token = token_resp.json().get("access_token")
-    if not access_token:
-        raise HTTPException(401, "IMS did not return an access token")
-
-    # Save to DB
-    result = await db.execute(select(DestinationConnection).where(DestinationConnection.org_id == body.orgId))
-    conn = result.scalar_one_or_none()
-    now = datetime.now(timezone.utc)
-
-    encrypted = encrypt(f"{body.clientId}:{body.clientSecret}")
-    if conn:
-        conn.client_id = body.clientId
-        conn.sandbox_name = body.sandboxName
-        conn.encrypted_credentials = encrypted
-        conn.authenticated = True
-        conn.last_authenticated_at = now
-    else:
-        conn = DestinationConnection(
-            org_id=body.orgId,
-            client_id=body.clientId,
-            sandbox_name=body.sandboxName,
-            encrypted_credentials=encrypted,
-            authenticated=True,
-            last_authenticated_at=now,
+        result = await db.execute(
+            select(SourceConnection)
+            .where(SourceConnection.authenticated == True)
+            .order_by(SourceConnection.last_authenticated_at.desc())
+            .limit(1)
         )
-        db.add(conn)
+        conn = result.scalar_one_or_none()
+        if conn:
+            login_id = conn.login_id
+            session_id = str(uuid.uuid4())
+            db.add(UserSession(
+                id=session_id,
+                login_id=login_id,
+                expires_at=datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS),
+            ))
+            _set_session_cookies(response, session_id, login_id)
+            return {"connected": True, "login": login_id}
+        return {"connected": False, "login": None}
 
-    log.info("AJO authenticated – orgId=%s", body.orgId)
-    return {"success": True, "authenticated": True}
-
-
-IMS_TOKEN_URL = "https://ims-na1.adobelogin.com/ims/token/v3"
-IMS_SCOPES = "openid,AdobeID,read_organizations,additional_info.projectedProductContext,session"
+    result = await db.execute(
+        select(SourceConnection).where(
+            SourceConnection.login_id == login_id,
+            SourceConnection.authenticated == True,
+        )
+    )
+    conn = result.scalar_one_or_none()
+    return {"connected": conn is not None, "login": conn.login_id if conn else None}
 
 
 @app.post("/api/ajo/connect")
@@ -315,7 +391,6 @@ async def ajo_connect(
         raise HTTPException(401, "IMS did not return an access token")
 
     expires_in = int(payload.get("expires_in", 3600))
-    # IMS v3 returns expires_in in seconds; older responses use milliseconds
     if expires_in > 86_400:
         expires_in //= 1000
     now = datetime.now(timezone.utc)
@@ -350,68 +425,12 @@ async def ajo_connect(
         )
         db.add(conn)
 
-    log.info("AJO authenticated – orgId=%s, token expires at %s", body.org_id, token_expires_at)
+    log.info("AJO authenticated – orgId=%s", body.org_id)
     return {"success": True, "authenticated": True, "expires_in": expires_in}
 
 
-@app.get("/api/connections/status")
-async def connections_status(
-    acc_session: Optional[str] = Cookie(default=None),
-    acc_user: Optional[str] = Cookie(default=None),
-    db: AsyncSession = Depends(get_db),
-):
-    login_id = await get_login_from_cookie(acc_session, db, acc_user)
-
-    src = None
-    dst = None
-
-    if login_id:
-        result = await db.execute(
-            select(SourceConnection).where(
-                SourceConnection.login_id == login_id,
-                SourceConnection.authenticated == True,
-            )
-        )
-        src = result.scalar_one_or_none()
-
-        if src:
-            result = await db.execute(
-                select(DestinationConnection).where(DestinationConnection.authenticated == True)
-            )
-            dst = result.scalar_one_or_none()
-
-    return {
-        "sourceAuthenticated": src is not None,
-        "destinationAuthenticated": dst is not None,
-        "sourceLoginId": src.login_id if src else None,
-        "destinationOrgId": dst.org_id if dst else None,
-        "destinationSandboxName": dst.sandbox_name if dst else None,
-    }
-
-
-@app.get("/api/acc/status")
-async def acc_status(
-    acc_session: Optional[str] = Cookie(default=None),
-    acc_user: Optional[str] = Cookie(default=None),
-    db: AsyncSession = Depends(get_db),
-):
-    login_id = await get_login_from_cookie(acc_session, db, acc_user)
-    if not login_id:
-        return {"connected": False, "login": None}
-    result = await db.execute(
-        select(SourceConnection).where(
-            SourceConnection.login_id == login_id,
-            SourceConnection.authenticated == True,
-        )
-    )
-    conn = result.scalar_one_or_none()
-    return {"connected": conn is not None, "login": conn.login_id if conn else None}
-
-
 @app.get("/api/ajo/status")
-async def ajo_status(
-    db: AsyncSession = Depends(get_db),
-):
+async def ajo_status(db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(DestinationConnection).where(DestinationConnection.authenticated == True)
     )
@@ -438,9 +457,11 @@ async def acc_schemas(
     if not conn:
         raise HTTPException(401, "Source not found")
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    soap_url = conn.instance_url.rstrip("/") + "/nl/jsp/soaprouter.jsp"
+
+    async with httpx.AsyncClient(timeout=SOAP_TIMEOUT) as client:
         resp = await client.post(
-            ACC_ENDPOINT,
+            soap_url,
             content=build_list_schemas_envelope(conn.session_token, conn.security_token),
             headers={
                 "Content-Type": "text/xml; charset=utf-8",
@@ -450,10 +471,64 @@ async def acc_schemas(
             },
         )
 
+    fault = parse_fault(resp.text)
+    if fault:
+        raise HTTPException(401, fault)
+
     schemas = parse_schemas(resp.text)
     if not schemas:
         log.warning("No schemas parsed – raw response: %s", resp.text[:1000])
     return {"schemas": schemas}
+
+
+@app.get("/api/acc/schemas/{namespace}/{name}")
+async def acc_schema_detail(
+    namespace: str,
+    name: str,
+    acc_session: Optional[str] = Cookie(default=None),
+    acc_user: Optional[str] = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    login_id = await get_login_from_cookie(acc_session, db, acc_user)
+    if not login_id:
+        raise HTTPException(401, "Not authenticated")
+
+    result = await db.execute(select(SourceConnection).where(SourceConnection.login_id == login_id))
+    conn = result.scalar_one_or_none()
+    if not conn:
+        raise HTTPException(401, "Source not found")
+
+    soap_url = conn.instance_url.rstrip("/") + "/nl/jsp/soaprouter.jsp"
+    headers_base = {
+        "Content-Type": "text/xml; charset=utf-8",
+        "Cookie": f"__sessiontoken={conn.session_token}",
+        "X-Security-Token": conn.security_token,
+    }
+
+    async with httpx.AsyncClient(timeout=SOAP_TIMEOUT) as client:
+        # First try xtk:schema#Get
+        resp = await client.post(
+            soap_url,
+            content=build_get_schema_envelope(conn.session_token, conn.security_token, namespace, name),
+            headers={**headers_base, "SOAPAction": "xtk:schema#Get"},
+        )
+
+        fault = parse_fault(resp.text)
+        if fault:
+            log.info("xtk:schema#Get returned fault (%s), trying srcSchema fallback", fault)
+            resp = await client.post(
+                soap_url,
+                content=build_srcschema_get_envelope(conn.session_token, conn.security_token, namespace, name),
+                headers={**headers_base, "SOAPAction": "xtk:queryDef#ExecuteQuery"},
+            )
+            fault2 = parse_fault(resp.text)
+            if fault2:
+                raise HTTPException(404, f"Schema {namespace}:{name} not found: {fault2}")
+
+    detail = parse_schema_detail(resp.text)
+    if not detail:
+        raise HTTPException(404, f"Schema {namespace}:{name} could not be parsed")
+    return detail
 
 
 @app.get("/debug/schemas-raw")
@@ -471,9 +546,11 @@ async def schemas_raw(
     if not conn:
         raise HTTPException(401, "Source not found")
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    soap_url = conn.instance_url.rstrip("/") + "/nl/jsp/soaprouter.jsp"
+
+    async with httpx.AsyncClient(timeout=SOAP_TIMEOUT) as client:
         resp = await client.post(
-            ACC_ENDPOINT,
+            soap_url,
             content=build_list_schemas_envelope(conn.session_token, conn.security_token),
             headers={
                 "Content-Type": "text/xml; charset=utf-8",
