@@ -1,14 +1,11 @@
 import httpx
 import xml.etree.ElementTree as ET
 
-ACC_SOAP_URL = "http://localhost:8080/nl/jsp/soaprouter.jsp"
+DEFAULT_INSTANCE_URL = "http://localhost:8080"
 
 
-def _soap_headers(session_token: str, security_token: str) -> dict:
-    return {
-        "Content-Type": "text/xml; charset=utf-8",
-        "SOAPAction": "",
-    }
+def _soap_url(instance_url: str) -> str:
+    return f"{instance_url.rstrip('/')}/nl/jsp/soaprouter.jsp"
 
 
 def _check_fault(root: ET.Element) -> None:
@@ -20,15 +17,22 @@ def _check_fault(root: ET.Element) -> None:
         raise ValueError(f"SOAP fault: {fault_string} | {detail}")
 
 
-def _header_block(session_token: str, security_token: str) -> str:
+def _classic_header_block(session_token: str, security_token: str) -> str:
     return f"""  <soapenv:Header>
     <Cookie xmlns="urn:xtk:session">__sessiontoken={session_token}</Cookie>
     <X-Security-Token xmlns="urn:xtk:session">{security_token}</X-Security-Token>
   </soapenv:Header>"""
 
 
-def logon(login: str, password: str) -> tuple[str, str]:
-    """Returns (session_token, security_token)."""
+def _http_headers(action: str, ims_token: str | None = None) -> dict:
+    h = {"Content-Type": "text/xml; charset=utf-8", "SOAPAction": action}
+    if ims_token:
+        h["Authorization"] = f"Bearer {ims_token}"
+    return h
+
+
+def logon(login: str, password: str, instance_url: str = DEFAULT_INSTANCE_URL) -> tuple[str, str]:
+    """Classic login — returns (session_token, security_token)."""
     envelope = f"""<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:urn="urn:xtk:session">
   <soapenv:Header/>
   <soapenv:Body>
@@ -42,10 +46,11 @@ def logon(login: str, password: str) -> tuple[str, str]:
 </soapenv:Envelope>"""
 
     with httpx.Client(timeout=30.0) as client:
-        response = client.post(ACC_SOAP_URL, content=envelope.encode("utf-8"), headers={
-            "Content-Type": "text/xml; charset=utf-8",
-            "SOAPAction": "xtk:session#Logon",
-        })
+        response = client.post(
+            _soap_url(instance_url),
+            content=envelope.encode("utf-8"),
+            headers=_http_headers("xtk:session#Logon"),
+        )
 
     root = ET.fromstring(response.text)
     _check_fault(root)
@@ -56,16 +61,27 @@ def logon(login: str, password: str) -> tuple[str, str]:
 
     security_token_el = root.find(".//{urn:xtk:session}pstrSecurityToken")
     security_token = security_token_el.text if security_token_el is not None else ""
+    return (session_token_el.text or "", security_token)
 
-    return (session_token_el.text or "", security_token or "")
 
+def get_schemas(
+    session_token: str | None,
+    security_token: str | None,
+    instance_url: str = DEFAULT_INSTANCE_URL,
+    ims_token: str | None = None,
+) -> list[dict]:
+    if ims_token:
+        header_block = "  <soapenv:Header/>"
+        body_session = ""
+    else:
+        header_block = _classic_header_block(session_token, security_token)
+        body_session = session_token
 
-def get_schemas(session_token: str, security_token: str) -> list[dict]:
     envelope = f"""<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:urn="urn:xtk:queryDef">
-{_header_block(session_token, security_token)}
+{header_block}
   <soapenv:Body>
     <urn:ExecuteQuery>
-      <urn:sessiontoken>{session_token}</urn:sessiontoken>
+      <urn:sessiontoken>{body_session}</urn:sessiontoken>
       <urn:entity>
         <queryDef schema="xtk:schema" operation="select" lineCount="9999">
           <select>
@@ -84,10 +100,11 @@ def get_schemas(session_token: str, security_token: str) -> list[dict]:
 </soapenv:Envelope>"""
 
     with httpx.Client(timeout=30.0) as client:
-        response = client.post(ACC_SOAP_URL, content=envelope.encode("utf-8"), headers={
-            "Content-Type": "text/xml; charset=utf-8",
-            "SOAPAction": "xtk:queryDef#ExecuteQuery",
-        })
+        response = client.post(
+            _soap_url(instance_url),
+            content=envelope.encode("utf-8"),
+            headers=_http_headers("xtk:queryDef#ExecuteQuery", ims_token),
+        )
 
     root = ET.fromstring(response.text)
     _check_fault(root)
@@ -103,17 +120,29 @@ def get_schemas(session_token: str, security_token: str) -> list[dict]:
                     "name": name,
                     "label": el.get("label", "") or el.get("_cs", ""),
                 })
-
     return schemas
 
 
-def get_schema_detail(session_token: str, security_token: str, namespace: str, name: str) -> dict:
-    """Fetch schema structure by querying nested element/attribute paths via xtk:schema."""
+def get_schema_detail(
+    session_token: str | None,
+    security_token: str | None,
+    namespace: str,
+    name: str,
+    instance_url: str = DEFAULT_INSTANCE_URL,
+    ims_token: str | None = None,
+) -> dict:
+    if ims_token:
+        header_block = "  <soapenv:Header/>"
+        body_session = ""
+    else:
+        header_block = _classic_header_block(session_token, security_token)
+        body_session = session_token
+
     envelope = f"""<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:urn="urn:xtk:queryDef">
-{_header_block(session_token, security_token)}
+{header_block}
   <soapenv:Body>
     <urn:ExecuteQuery>
-      <urn:sessiontoken>{session_token}</urn:sessiontoken>
+      <urn:sessiontoken>{body_session}</urn:sessiontoken>
       <urn:entity>
         <queryDef xtkschema="xtk:queryDef" schema="xtk:srcSchema" operation="get">
           <select>
@@ -133,41 +162,31 @@ def get_schema_detail(session_token: str, security_token: str, namespace: str, n
 </soapenv:Envelope>"""
 
     with httpx.Client(timeout=30.0) as client:
-        response = client.post(ACC_SOAP_URL, content=envelope.encode("utf-8"), headers={
-            "Content-Type": "text/xml; charset=utf-8",
-            "SOAPAction": "xtk:queryDef#ExecuteQuery",
-        })
-
-    print("=== SCHEMA DETAIL RESPONSE ===")
-    print(response.text[:4000])
-    print("==============================")
+        response = client.post(
+            _soap_url(instance_url),
+            content=envelope.encode("utf-8"),
+            headers=_http_headers("xtk:queryDef#ExecuteQuery", ims_token),
+        )
 
     root = ET.fromstring(response.text)
     _check_fault(root)
 
-    # The schema XML lives inside a <data> element in the response
     schema_el = None
-
-    # First: look for <data> containing srcSchema/schema XML
     for el in root.iter():
         local = el.tag.split("}")[-1] if "}" in el.tag else el.tag
         if local == "data":
-            # The actual schema XML is a child of <data>
             for child in el:
                 child_local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
                 if child_local in ("srcSchema", "schema"):
                     schema_el = child
                     break
             if schema_el is None and el.text and el.text.strip():
-                # data might be a text blob — parse it
                 try:
-                    inner = ET.fromstring(el.text.strip())
-                    schema_el = inner
+                    schema_el = ET.fromstring(el.text.strip())
                 except Exception:
                     pass
             break
 
-    # Fallback: direct srcSchema/schema element anywhere
     if schema_el is None:
         for el in root.iter():
             local = el.tag.split("}")[-1] if "}" in el.tag else el.tag
@@ -182,26 +201,17 @@ def get_schema_detail(session_token: str, security_token: str, namespace: str, n
 
 
 def _parse_schema_element(schema_el: ET.Element) -> dict:
-    """Recursively parse a schema XML element into a structured dict."""
-
     def parse_element(el: ET.Element) -> dict:
         local = el.tag.split("}")[-1] if "}" in el.tag else el.tag
-        result: dict = {
-            "tag": local,
-            "attrs": {k: v for k, v in el.attrib.items()},
-            "children": [],
-        }
+        result: dict = {"tag": local, "attrs": dict(el.attrib), "children": []}
         for child in el:
             child_local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
-            if child_local in ("element", "attribute", "key", "join", "condition", "compute-string", "dbindex", "methods", "method", "parameters", "param"):
+            if child_local in ("element", "attribute", "key", "join", "condition",
+                               "compute-string", "dbindex", "methods", "method",
+                               "parameters", "param"):
                 result["children"].append(parse_element(child))
         return result
 
-    elements = []
-    attributes = []
-    others = []
-
-    # attributes can be at top level or nested inside the main <element>
     def extract_attrs(el: ET.Element) -> list[dict]:
         result = []
         for child in el:
@@ -218,10 +228,13 @@ def _parse_schema_element(schema_el: ET.Element) -> dict:
                 })
         return result
 
+    elements = []
+    attributes = []
+    others = []
+
     for child in schema_el:
         local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
         if local == "element":
-            # collect attributes from inside the main element
             inner_attrs = extract_attrs(child)
             if inner_attrs:
                 attributes.extend(inner_attrs)

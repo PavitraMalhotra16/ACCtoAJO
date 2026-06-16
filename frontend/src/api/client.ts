@@ -1,10 +1,10 @@
 const BASE = ''  // proxied via vite
 
-export async function accConnect(login: string, password: string) {
+export async function accConnect(payload: Record<string, string>) {
   const res = await fetch(`${BASE}/api/acc/connect`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ login, password }),
+    body: JSON.stringify(payload),
   })
   if (!res.ok) {
     const err = await res.json()

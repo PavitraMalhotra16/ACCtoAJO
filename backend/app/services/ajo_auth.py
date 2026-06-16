@@ -3,16 +3,15 @@ import json
 import httpx
 
 IMS_TOKEN_URL = "https://ims-na1.adobelogin.com/ims/token/v3"
-AJO_JOURNEYS_URL = "https://cjm.adobe.io/imp/journeys"
 
 
-def get_ims_token(client_id: str, client_secret: str, org_id: str) -> tuple[str, int]:
+def get_ims_token(client_id: str, client_secret: str, org_id: str = "", scope: str = "openid,AdobeID") -> tuple[str, int]:
     """Returns (access_token, expires_in_seconds)."""
     data = {
         "grant_type": "client_credentials",
         "client_id": client_id,
         "client_secret": client_secret,
-        "scope": "openid,AdobeID",
+        "scope": scope or "openid,AdobeID",
     }
 
     with httpx.Client(timeout=30.0) as client:
@@ -37,30 +36,25 @@ def get_ims_token(client_id: str, client_secret: str, org_id: str) -> tuple[str,
 
 
 def verify_ajo_access(access_token: str, client_id: str, org_id: str, sandbox_name: str) -> bool:
-    headers = {
-        "Content-Type": "application/json",
-        "Cache-Control": "no-cache",
-        "Authorization": f"Bearer {access_token}",
-        "X-Api-Key": client_id,
-        "x-gw-ims-org-id": org_id,
-        "x-sandbox-name": sandbox_name,
-    }
+    """Verify AJO credentials by checking JWT claims match the provided client_id and org_id."""
+    claims = decode_jwt_claims(access_token)
 
-    with httpx.Client(timeout=30.0) as client:
-        response = client.get(AJO_JOURNEYS_URL, headers=headers, params={"limit": 1})
+    token_client_id = claims.get("client_id") or claims.get("azp") or ""
+    token_org = claims.get("org") or ""
 
-    if response.status_code == 200:
-        return True
+    if token_client_id and token_client_id != client_id:
+        raise ValueError(
+            f"Token client_id '{token_client_id}' does not match provided client_id '{client_id}'"
+        )
 
-    if response.status_code in (401, 403):
-        try:
-            body = response.json()
-            detail = body.get("title") or body.get("detail") or body.get("message") or response.text
-        except Exception:
-            detail = response.text
-        raise ValueError(f"AJO access denied ({response.status_code}): {detail}")
+    # org_id in token is typically without the @AdobeOrg suffix
+    org_id_short = org_id.replace("@AdobeOrg", "")
+    if token_org and token_org != org_id and token_org != org_id_short:
+        raise ValueError(
+            f"Token org '{token_org}' does not match provided org_id '{org_id}'"
+        )
 
-    raise ValueError(f"AJO verification failed with status {response.status_code}: {response.text}")
+    return True
 
 
 def decode_jwt_claims(token: str) -> dict:

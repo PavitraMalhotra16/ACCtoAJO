@@ -3,6 +3,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from app.db import create_tables
 from app.api.acc import router as acc_router
 from app.api.ajo import router as ajo_router
