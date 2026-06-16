@@ -41,6 +41,8 @@ class DestinationConnection(Base):
     client_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     sandbox_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     encrypted_credentials: Mapped[str | None] = mapped_column(Text, nullable=True)
+    encrypted_access_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     authenticated: Mapped[bool] = mapped_column(Boolean, default=False)
     last_authenticated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

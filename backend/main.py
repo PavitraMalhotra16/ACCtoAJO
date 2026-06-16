@@ -121,6 +121,13 @@ class AjoLoginRequest(BaseModel):
     sandboxName: str
 
 
+class AjoConnectRequest(BaseModel):
+    org_id: str
+    client_id: str
+    client_secret: str
+    sandbox_name: str
+
+
 # ── Routes ───────────────────────────────────────────────────────────────────
 
 @app.post("/api/source/authenticate")
@@ -268,6 +275,80 @@ async def destination_authenticate(
 
     log.info("AJO authenticated – orgId=%s", body.orgId)
     return {"success": True, "authenticated": True}
+
+
+IMS_TOKEN_URL = "https://ims-na1.adobelogin.com/ims/token/v3"
+IMS_SCOPES = "openid,AdobeID,read_organizations,additional_info.projectedProductContext,session"
+
+
+@app.post("/api/ajo/connect")
+async def ajo_connect(
+    body: AjoConnectRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    log.info("AJO connect attempt – orgId=%s", body.org_id)
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            token_resp = await client.post(
+                IMS_TOKEN_URL,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": body.client_id,
+                    "client_secret": body.client_secret,
+                    "scope": IMS_SCOPES,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+        except httpx.RequestError:
+            raise HTTPException(502, "Cannot reach Adobe IMS")
+
+    if token_resp.status_code != 200:
+        raise HTTPException(401, "AJO authentication failed – check credentials")
+
+    payload = token_resp.json()
+    access_token = payload.get("access_token")
+    if not access_token:
+        raise HTTPException(401, "IMS did not return an access token")
+
+    expires_in = int(payload.get("expires_in", 3600))
+    # IMS v3 returns expires_in in seconds; older responses use milliseconds
+    if expires_in > 86_400:
+        expires_in //= 1000
+    now = datetime.now(timezone.utc)
+    token_expires_at = now + timedelta(seconds=expires_in)
+
+    result = await db.execute(
+        select(DestinationConnection).where(DestinationConnection.org_id == body.org_id)
+    )
+    conn = result.scalar_one_or_none()
+
+    encrypted_creds = encrypt(f"{body.client_id}:{body.client_secret}")
+    encrypted_token = encrypt(access_token)
+
+    if conn:
+        conn.client_id = body.client_id
+        conn.sandbox_name = body.sandbox_name
+        conn.encrypted_credentials = encrypted_creds
+        conn.encrypted_access_token = encrypted_token
+        conn.token_expires_at = token_expires_at
+        conn.authenticated = True
+        conn.last_authenticated_at = now
+    else:
+        conn = DestinationConnection(
+            org_id=body.org_id,
+            client_id=body.client_id,
+            sandbox_name=body.sandbox_name,
+            encrypted_credentials=encrypted_creds,
+            encrypted_access_token=encrypted_token,
+            token_expires_at=token_expires_at,
+            authenticated=True,
+            last_authenticated_at=now,
+        )
+        db.add(conn)
+
+    log.info("AJO authenticated – orgId=%s, token expires at %s", body.org_id, token_expires_at)
+    return {"success": True, "authenticated": True, "expires_in": expires_in}
 
 
 @app.get("/api/connections/status")
