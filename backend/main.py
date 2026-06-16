@@ -389,6 +389,40 @@ async def connections_status(
     }
 
 
+@app.get("/api/acc/status")
+async def acc_status(
+    acc_session: Optional[str] = Cookie(default=None),
+    acc_user: Optional[str] = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    login_id = await get_login_from_cookie(acc_session, db, acc_user)
+    if not login_id:
+        return {"connected": False, "login": None}
+    result = await db.execute(
+        select(SourceConnection).where(
+            SourceConnection.login_id == login_id,
+            SourceConnection.authenticated == True,
+        )
+    )
+    conn = result.scalar_one_or_none()
+    return {"connected": conn is not None, "login": conn.login_id if conn else None}
+
+
+@app.get("/api/ajo/status")
+async def ajo_status(
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(DestinationConnection).where(DestinationConnection.authenticated == True)
+    )
+    conn = result.scalar_one_or_none()
+    return {
+        "connected": conn is not None,
+        "org_id": conn.org_id if conn else None,
+        "sandbox_name": conn.sandbox_name if conn else None,
+    }
+
+
 @app.get("/api/acc/schemas")
 async def acc_schemas(
     acc_session: Optional[str] = Cookie(default=None),
