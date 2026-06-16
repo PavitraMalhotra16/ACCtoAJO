@@ -1,0 +1,23 @@
+# Environment variables - NEVER commit these
+.env
+*.env
+
+# Python virtual environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Node / frontend
+node_modules/
+frontend_app/node_modules/
+frontend_app/dist/
+
+# IDE
+.vscode/
+.idea/
+
+# Cloned repo folders (temp)
+_acc_clone/
+_repo_clone/
