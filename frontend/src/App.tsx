@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import ConfigPage from './pages/ConfigPage'
 import SchemasPage from './pages/SchemasPage'
@@ -9,7 +10,11 @@ function ProtectedRoute({ children, condition }: { children: React.ReactNode; co
 }
 
 export default function App() {
-  const { accConnected, ajoConnected } = useConfigStore()
+  const { accConnected, ajoConnected, fetchStatus } = useConfigStore()
+
+  useEffect(() => {
+    fetchStatus()
+  }, [])
   return (
     <BrowserRouter>
       <Routes>

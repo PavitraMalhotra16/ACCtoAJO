@@ -35,12 +35,13 @@ export async function getSchemas(): Promise<{ schemas: Array<{ namespace: string
   return res.json()
 }
 
-export async function getAccStatus(): Promise<{ connected: boolean; login: string | null }> {
-  const res = await fetch(`${BASE}/api/acc/status`)
-  return res.json()
-}
-
-export async function getAjoStatus(): Promise<{ connected: boolean; org_id: string | null; sandbox_name: string | null }> {
-  const res = await fetch(`${BASE}/api/ajo/status`)
+export async function getConnectionsStatus(): Promise<{
+  sourceAuthenticated: boolean
+  destinationAuthenticated: boolean
+  sourceLoginId: string | null
+  destinationOrgId: string | null
+  destinationSandboxName: string | null
+}> {
+  const res = await fetch(`${BASE}/api/connections/status`)
   return res.json()
 }
