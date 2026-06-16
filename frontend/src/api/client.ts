@@ -17,6 +17,10 @@ export async function accDisconnect() {
   await fetch(`${BASE}/api/acc/disconnect`, { method: 'POST' })
 }
 
+export async function ajoDisconnect() {
+  await fetch(`${BASE}/api/ajo/disconnect`, { method: 'POST' })
+}
+
 export async function ajoConnect(orgId: string, clientId: string, clientSecret: string, sandboxName: string, referenceToken?: string) {
   const res = await fetch(`${BASE}/api/ajo/connect`, {
     method: 'POST',

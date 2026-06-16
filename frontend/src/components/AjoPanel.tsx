@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ajoConnect } from '../api/client'
+import { ajoConnect, ajoDisconnect } from '../api/client'
 import { useConfigStore } from '../store/configStore'
 
 export default function AjoPanel() {
@@ -9,7 +9,7 @@ export default function AjoPanel() {
   const [sandboxName, setSandboxName] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const { ajoConnected, ajoOrgId, ajoSandboxName, setAjoConnected } = useConfigStore()
+  const { ajoConnected, ajoOrgId, ajoSandboxName, setAjoConnected, setAjoDisconnected } = useConfigStore()
 
   async function handleConnect() {
     setLoading(true)
@@ -35,11 +35,19 @@ export default function AjoPanel() {
       </div>
 
       {ajoConnected ? (
-        <div className="flex items-center gap-2 text-green-600 bg-green-50 rounded-lg px-4 py-3">
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-          </svg>
-          <span className="font-medium">Connected · <strong>{ajoOrgId}</strong> / <strong>{ajoSandboxName}</strong></span>
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center gap-2 text-green-600 bg-green-50 rounded-lg px-4 py-3">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            </svg>
+            <span className="font-medium">Connected · <strong>{ajoOrgId}</strong> / <strong>{ajoSandboxName}</strong></span>
+          </div>
+          <button
+            onClick={async () => { await ajoDisconnect(); setAjoDisconnected() }}
+            className="text-sm text-gray-500 hover:text-blue-600 underline text-center transition-colors"
+          >
+            Disconnect &amp; reconnect
+          </button>
         </div>
       ) : (
         <div className="flex flex-col gap-4">
