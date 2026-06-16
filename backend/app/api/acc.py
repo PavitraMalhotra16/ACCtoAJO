@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import Config
-from app.services.acc_soap import logon, get_schemas
+from app.services.acc_soap import logon, get_schemas, get_schema_detail
 
 router = APIRouter(prefix="/api/acc", tags=["acc"])
 
@@ -70,6 +70,35 @@ def list_schemas(db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=f"Failed to fetch schemas: {str(e)}")
 
     return {"schemas": schemas}
+
+
+@router.get("/schemas/{namespace}/{name}")
+def get_schema(namespace: str, name: str, db: Session = Depends(get_db)):
+    config = _get_acc_config(db)
+    if not config or not config.connected:
+        raise HTTPException(status_code=400, detail="ACC not configured")
+
+    config_data = json.loads(config.config_json)
+    session_token = config_data.get("session_token", "")
+    security_token = config_data.get("security_token", "")
+
+    try:
+        detail = get_schema_detail(session_token, security_token, namespace, name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch schema detail: {str(e)}")
+
+    return detail
+
+
+@router.post("/disconnect")
+def disconnect_acc(db: Session = Depends(get_db)):
+    existing = _get_acc_config(db)
+    if existing:
+        db.delete(existing)
+        db.commit()
+    return {"status": "ok", "message": "ACC disconnected"}
 
 
 @router.get("/status")

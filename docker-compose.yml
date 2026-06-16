@@ -1,12 +1,24 @@
 services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: acc2ajo
+      POSTGRES_USER: acc2ajo
+      POSTGRES_PASSWORD: acc2ajo
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
   backend:
     build: ./backend
     ports:
       - "8000:8000"
-    volumes:
-      - ./data:/app/data
+    depends_on:
+      - postgres
     environment:
-      - DATABASE_URL=sqlite:///./data/acc2ajo.db
+      - DATABASE_URL=postgresql://acc2ajo:acc2ajo@postgres:5432/acc2ajo
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -18,3 +30,6 @@ services:
       - backend
     environment:
       - VITE_API_URL=http://backend:8000
+
+volumes:
+  postgres_data:

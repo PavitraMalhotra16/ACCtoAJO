@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { accConnect } from '../api/client'
+import { accConnect, accDisconnect } from '../api/client'
 import { useConfigStore } from '../store/configStore'
 
 export default function AccPanel() {
@@ -7,7 +7,7 @@ export default function AccPanel() {
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const { accConnected, accLogin, setAccConnected } = useConfigStore()
+  const { accConnected, accLogin, setAccConnected, setAccDisconnected } = useConfigStore()
 
   async function handleConnect() {
     setLoading(true)
@@ -22,6 +22,11 @@ export default function AccPanel() {
     }
   }
 
+  async function handleDisconnect() {
+    await accDisconnect()
+    setAccDisconnected()
+  }
+
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 flex flex-col gap-6">
       <div className="flex items-center gap-3">
@@ -33,11 +38,19 @@ export default function AccPanel() {
       </div>
 
       {accConnected ? (
-        <div className="flex items-center gap-2 text-green-600 bg-green-50 rounded-lg px-4 py-3">
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-          </svg>
-          <span className="font-medium">Connected as <strong>{accLogin}</strong></span>
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center gap-2 text-green-600 bg-green-50 rounded-lg px-4 py-3">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            </svg>
+            <span className="font-medium">Connected as <strong>{accLogin}</strong></span>
+          </div>
+          <button
+            onClick={handleDisconnect}
+            className="text-sm text-gray-500 hover:text-red-600 underline text-center transition-colors"
+          >
+            Disconnect &amp; reconnect
+          </button>
         </div>
       ) : (
         <div className="flex flex-col gap-4">
