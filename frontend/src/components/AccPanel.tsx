@@ -14,6 +14,7 @@ export default function AccPanel() {
 
   // Technical account fields
   const [techInstanceUrl, setTechInstanceUrl] = useState('')
+  const [orgId, setOrgId] = useState('')
   const [clientId, setClientId] = useState('')
   const [clientSecret, setClientSecret] = useState('')
   const [scope, setScope] = useState('')
@@ -30,7 +31,7 @@ export default function AccPanel() {
         await accConnect({ auth_type: 'classic', instance_url: instanceUrl, login, password })
         setAccConnected(login)
       } else {
-        await accConnect({ auth_type: 'technical', instance_url: techInstanceUrl, client_id: clientId, client_secret: clientSecret, scope })
+        await accConnect({ auth_type: 'technical', instance_url: techInstanceUrl, org_id: orgId, client_id: clientId, client_secret: clientSecret, scope })
         setAccConnected(clientId)
       }
     } catch (e: unknown) {
@@ -46,7 +47,7 @@ export default function AccPanel() {
   }
 
   const classicValid = instanceUrl && login && password
-  const technicalValid = techInstanceUrl && clientId && clientSecret && scope
+  const technicalValid = techInstanceUrl && orgId && clientId && clientSecret && scope
   const canConnect = mode === 'classic' ? classicValid : technicalValid
 
   return (
@@ -117,6 +118,12 @@ export default function AccPanel() {
                 <input type="text" value={techInstanceUrl} onChange={e => setTechInstanceUrl(e.target.value)}
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500"
                   placeholder="https://your-instance.campaign.adobe.com" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Org ID</label>
+                <input type="text" value={orgId} onChange={e => setOrgId(e.target.value)}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500"
+                  placeholder="XXXXXXXX@AdobeOrg" />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
