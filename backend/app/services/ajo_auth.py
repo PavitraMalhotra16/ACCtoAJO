@@ -6,7 +6,8 @@ IMS_TOKEN_URL = "https://ims-na1.adobelogin.com/ims/token/v3"
 AJO_JOURNEYS_URL = "https://cjm.adobe.io/imp/journeys"
 
 
-def get_ims_token(client_id: str, client_secret: str, org_id: str) -> str:
+def get_ims_token(client_id: str, client_secret: str, org_id: str) -> tuple[str, int]:
+    """Returns (access_token, expires_in_seconds)."""
     data = {
         "grant_type": "client_credentials",
         "client_id": client_id,
@@ -31,7 +32,8 @@ def get_ims_token(client_id: str, client_secret: str, org_id: str) -> str:
     if not access_token:
         raise ValueError("No access_token in IMS response")
 
-    return access_token
+    expires_in = int(body.get("expires_in", 86400))
+    return access_token, expires_in
 
 
 def verify_ajo_access(access_token: str, client_id: str, org_id: str, sandbox_name: str) -> bool:
@@ -62,7 +64,6 @@ def verify_ajo_access(access_token: str, client_id: str, org_id: str, sandbox_na
 
 
 def decode_jwt_claims(token: str) -> dict:
-    """Decode JWT payload without verifying signature."""
     try:
         payload_b64 = token.split(".")[1]
         payload_b64 += "=" * (4 - len(payload_b64) % 4)
@@ -72,7 +73,6 @@ def decode_jwt_claims(token: str) -> dict:
 
 
 def compare_token_claims(generated_token: str, reference_token: str) -> None:
-    """Raise ValueError if client_id or org don't match between tokens."""
     gen = decode_jwt_claims(generated_token)
     ref = decode_jwt_claims(reference_token)
 

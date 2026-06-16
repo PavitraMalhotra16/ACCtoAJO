@@ -6,7 +6,6 @@ export default function AjoPanel() {
   const [orgId, setOrgId] = useState('')
   const [clientId, setClientId] = useState('')
   const [clientSecret, setClientSecret] = useState('')
-  const [referenceToken, setReferenceToken] = useState('')
   const [sandboxName, setSandboxName] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -16,7 +15,7 @@ export default function AjoPanel() {
     setLoading(true)
     setError(null)
     try {
-      await ajoConnect(orgId, clientId, clientSecret, sandboxName, referenceToken || undefined)
+      await ajoConnect(orgId, clientId, clientSecret, sandboxName)
       setAjoConnected(orgId, sandboxName)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Connection failed')
@@ -72,16 +71,6 @@ export default function AjoPanel() {
               onChange={e => setClientSecret(e.target.value)}
               className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               placeholder="••••••••"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Reference Token <span className="text-gray-400 font-normal">(optional — validates identity match)</span></label>
-            <textarea
-              value={referenceToken}
-              onChange={e => setReferenceToken(e.target.value)}
-              rows={3}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-              placeholder="Paste a known valid JWT access token to verify identity match..."
             />
           </div>
           <div>

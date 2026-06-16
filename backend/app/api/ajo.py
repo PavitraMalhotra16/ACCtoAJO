@@ -27,7 +27,7 @@ def _get_ajo_config(db: Session) -> Config | None:
 @router.post("/connect")
 def connect_ajo(body: AjoConnectRequest, db: Session = Depends(get_db)):
     try:
-        access_token = get_ims_token(body.client_id, body.client_secret, body.org_id)
+        access_token, expires_in = get_ims_token(body.client_id, body.client_secret, body.org_id)
         if body.reference_token:
             compare_token_claims(access_token, body.reference_token)
         verify_ajo_access(access_token, body.client_id, body.org_id, body.sandbox_name)
@@ -36,7 +36,6 @@ def connect_ajo(body: AjoConnectRequest, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to connect to AJO: {str(e)}")
 
-    # Store everything except client_secret; include access_token for future calls
     config_data = {
         "org_id": body.org_id,
         "client_id": body.client_id,
@@ -50,13 +49,12 @@ def connect_ajo(body: AjoConnectRequest, db: Session = Depends(get_db)):
         existing.connected = True
         existing.updated_at = datetime.utcnow()
     else:
-        record = Config(
+        db.add(Config(
             service="ajo",
             config_json=json.dumps(config_data),
             connected=True,
             updated_at=datetime.utcnow(),
-        )
-        db.add(record)
+        ))
 
     db.commit()
     return {"status": "ok", "message": "AJO connected successfully"}
@@ -67,10 +65,9 @@ def ajo_status(db: Session = Depends(get_db)):
     config = _get_ajo_config(db)
     if not config:
         return {"connected": False, "org_id": None, "sandbox_name": None}
-
-    config_data = json.loads(config.config_json)
+    data = json.loads(config.config_json)
     return {
         "connected": config.connected,
-        "org_id": config_data.get("org_id"),
-        "sandbox_name": config_data.get("sandbox_name"),
+        "org_id": data.get("org_id"),
+        "sandbox_name": data.get("sandbox_name"),
     }

@@ -108,41 +108,70 @@ def get_schemas(session_token: str, security_token: str) -> list[dict]:
 
 
 def get_schema_detail(session_token: str, security_token: str, namespace: str, name: str) -> dict:
-    """Fetch full schema definition and parse elements + attributes."""
-    envelope = f"""<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:urn="urn:xtk:persist">
+    """Fetch schema structure by querying nested element/attribute paths via xtk:schema."""
+    envelope = f"""<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:urn="urn:xtk:queryDef">
 {_header_block(session_token, security_token)}
   <soapenv:Body>
-    <urn:GetEntityIfMoreRecent>
+    <urn:ExecuteQuery>
       <urn:sessiontoken>{session_token}</urn:sessiontoken>
-      <urn:strSchema>xtk:schema</urn:strSchema>
-      <urn:strName>{namespace}:{name}</urn:strName>
-      <urn:md5Str></urn:md5Str>
-    </urn:GetEntityIfMoreRecent>
+      <urn:entity>
+        <queryDef xtkschema="xtk:queryDef" schema="xtk:srcSchema" operation="get">
+          <select>
+            <node expr="@namespace"/>
+            <node expr="@name"/>
+            <node expr="@label"/>
+            <node expr="data"/>
+          </select>
+          <where>
+            <condition expr="@namespace = &apos;{namespace}&apos;"/>
+            <condition expr="@name = &apos;{name}&apos;"/>
+          </where>
+        </queryDef>
+      </urn:entity>
+    </urn:ExecuteQuery>
   </soapenv:Body>
 </soapenv:Envelope>"""
 
     with httpx.Client(timeout=30.0) as client:
         response = client.post(ACC_SOAP_URL, content=envelope.encode("utf-8"), headers={
             "Content-Type": "text/xml; charset=utf-8",
-            "SOAPAction": "xtk:persist#GetEntityIfMoreRecent",
+            "SOAPAction": "xtk:queryDef#ExecuteQuery",
         })
+
+    print("=== SCHEMA DETAIL RESPONSE ===")
+    print(response.text[:4000])
+    print("==============================")
 
     root = ET.fromstring(response.text)
     _check_fault(root)
 
-    # Find the schema element in the response
+    # The schema XML lives inside a <data> element in the response
     schema_el = None
+
+    # First: look for <data> containing srcSchema/schema XML
     for el in root.iter():
         local = el.tag.split("}")[-1] if "}" in el.tag else el.tag
-        if local == "schema" and el.get("name") == name and el.get("namespace") == namespace:
-            schema_el = el
+        if local == "data":
+            # The actual schema XML is a child of <data>
+            for child in el:
+                child_local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+                if child_local in ("srcSchema", "schema"):
+                    schema_el = child
+                    break
+            if schema_el is None and el.text and el.text.strip():
+                # data might be a text blob — parse it
+                try:
+                    inner = ET.fromstring(el.text.strip())
+                    schema_el = inner
+                except Exception:
+                    pass
             break
 
+    # Fallback: direct srcSchema/schema element anywhere
     if schema_el is None:
-        # Fallback: first element named "schema" anywhere
         for el in root.iter():
             local = el.tag.split("}")[-1] if "}" in el.tag else el.tag
-            if local == "schema":
+            if local in ("srcSchema", "schema") and el.get("name") == name:
                 schema_el = el
                 break
 
@@ -172,9 +201,30 @@ def _parse_schema_element(schema_el: ET.Element) -> dict:
     attributes = []
     others = []
 
+    # attributes can be at top level or nested inside the main <element>
+    def extract_attrs(el: ET.Element) -> list[dict]:
+        result = []
+        for child in el:
+            local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+            if local == "attribute":
+                result.append({
+                    "name": child.get("name", ""),
+                    "type": child.get("type", ""),
+                    "label": child.get("label", ""),
+                    "length": child.get("length", ""),
+                    "required": child.get("required", ""),
+                    "enum": child.get("enum", ""),
+                    "desc": child.get("desc", ""),
+                })
+        return result
+
     for child in schema_el:
         local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
         if local == "element":
+            # collect attributes from inside the main element
+            inner_attrs = extract_attrs(child)
+            if inner_attrs:
+                attributes.extend(inner_attrs)
             elements.append(parse_element(child))
         elif local == "attribute":
             attributes.append({
@@ -186,7 +236,7 @@ def _parse_schema_element(schema_el: ET.Element) -> dict:
                 "enum": child.get("enum", ""),
                 "desc": child.get("desc", ""),
             })
-        else:
+        elif local not in ("createdBy", "modifiedBy"):
             others.append(parse_element(child))
 
     return {

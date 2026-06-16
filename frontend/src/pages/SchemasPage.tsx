@@ -40,7 +40,7 @@ export default function SchemasPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const [selectedNamespace, setSelectedNamespace] = useState<string | null>(null)
+  const [selectedNamespace, setSelectedNamespace] = useState<string>('')
   const [selectedSchema, setSelectedSchema] = useState<SchemaEntry | null>(null)
   const [detail, setDetail] = useState<SchemaDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
@@ -56,21 +56,23 @@ export default function SchemasPage() {
   const namespaces = [...new Set(schemas.map(s => s.namespace))].sort()
   const schemasInNamespace = schemas.filter(s => s.namespace === selectedNamespace)
 
-  function selectNamespace(ns: string) {
+  function handleNamespaceChange(ns: string) {
     setSelectedNamespace(ns)
     setSelectedSchema(null)
     setDetail(null)
     setDetailError(null)
   }
 
-  async function selectSchema(schema: SchemaEntry) {
+  async function handleSchemaChange(schemaName: string) {
+    const schema = schemasInNamespace.find(s => s.name === schemaName)
+    if (!schema) return
     setSelectedSchema(schema)
     setDetail(null)
     setDetailError(null)
     setDetailLoading(true)
     try {
       const d = await getSchemaDetail(schema.namespace, schema.name)
-      setDetail(d)
+      setDetail(d as SchemaDetail)
     } catch (e: unknown) {
       setDetailError(e instanceof Error ? e.message : 'Failed to load schema')
     } finally {
@@ -79,19 +81,11 @@ export default function SchemasPage() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className="min-h-screen flex flex-col bg-gray-50">
       {/* Header */}
       <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center gap-3">
         <button onClick={() => navigate('/')} className="text-sm text-gray-500 hover:text-gray-800">← Back</button>
         <h1 className="text-xl font-bold text-gray-900">ACC Schemas</h1>
-        {selectedNamespace && (
-          <><span className="text-gray-300">/</span>
-          <span className="text-sm font-mono text-red-600 bg-red-50 px-2 py-0.5 rounded">{selectedNamespace}</span></>
-        )}
-        {selectedSchema && (
-          <><span className="text-gray-300">/</span>
-          <span className="text-sm font-mono text-gray-700">{selectedSchema.name}</span></>
-        )}
       </div>
 
       {loading && (
@@ -106,53 +100,58 @@ export default function SchemasPage() {
       {error && <div className="m-6 bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-red-700">{error}</div>}
 
       {!loading && !error && (
-        <div className="flex flex-1" style={{ height: 'calc(100vh - 61px)' }}>
+        <div className="flex flex-col flex-1 px-6 py-6 gap-6 max-w-6xl w-full mx-auto">
 
-          {/* Column 1: Namespaces */}
-          <div className="w-44 border-r border-gray-200 bg-gray-50 overflow-y-auto flex-shrink-0">
-            <div className="px-3 pt-3 pb-1 text-xs font-semibold text-gray-400 uppercase tracking-wider">Namespaces</div>
-            {namespaces.map(ns => (
-              <button key={ns} onClick={() => selectNamespace(ns)}
-                className={`w-full text-left px-3 py-2 text-sm font-mono transition-colors border-l-2 ${
-                  selectedNamespace === ns
-                    ? 'bg-red-50 text-red-700 border-red-500 font-semibold'
-                    : 'text-gray-700 hover:bg-gray-100 border-transparent'
-                }`}>
-                {ns}
-                <span className="ml-1 text-xs text-gray-400">({schemas.filter(s => s.namespace === ns).length})</span>
-              </button>
-            ))}
+          {/* Dropdowns row */}
+          <div className="flex gap-4 items-end">
+            <div className="flex flex-col gap-1.5 w-56">
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Namespace</label>
+              <select
+                value={selectedNamespace}
+                onChange={e => handleNamespaceChange(e.target.value)}
+                className="border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-red-500 shadow-sm"
+              >
+                <option value="">— Select namespace —</option>
+                {namespaces.map(ns => (
+                  <option key={ns} value={ns}>{ns} ({schemas.filter(s => s.namespace === ns).length})</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex flex-col gap-1.5 flex-1 max-w-sm">
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Schema / Table</label>
+              <select
+                value={selectedSchema?.name ?? ''}
+                onChange={e => handleSchemaChange(e.target.value)}
+                disabled={!selectedNamespace}
+                className="border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-sm disabled:bg-gray-100 disabled:text-gray-400"
+              >
+                <option value="">— Select schema —</option>
+                {schemasInNamespace.map(s => (
+                  <option key={s.name} value={s.name}>{s.label || s.name} ({s.name})</option>
+                ))}
+              </select>
+            </div>
+
+            {selectedSchema && (
+              <div className="flex items-end pb-0.5">
+                <span className="text-sm font-mono text-gray-500 bg-gray-100 px-2 py-1.5 rounded">
+                  {selectedSchema.namespace}:{selectedSchema.name}
+                </span>
+              </div>
+            )}
           </div>
 
-          {/* Column 2: Schemas */}
-          <div className="w-60 border-r border-gray-200 bg-white overflow-y-auto flex-shrink-0">
-            {!selectedNamespace
-              ? <div className="px-4 py-10 text-sm text-gray-400 text-center">← Select a namespace</div>
-              : <>
-                  <div className="px-3 pt-3 pb-1 text-xs font-semibold text-gray-400 uppercase tracking-wider">Schemas</div>
-                  {schemasInNamespace.map(s => (
-                    <button key={`${s.namespace}:${s.name}`} onClick={() => selectSchema(s)}
-                      className={`w-full text-left px-3 py-2.5 border-b border-gray-50 border-l-2 transition-colors ${
-                        selectedSchema?.name === s.name
-                          ? 'bg-blue-50 text-blue-800 border-blue-500'
-                          : 'hover:bg-gray-50 border-transparent'
-                      }`}>
-                      <div className="text-sm font-medium truncate">{s.label || s.name}</div>
-                      <div className="text-xs font-mono text-gray-400">{s.name}</div>
-                    </button>
-                  ))}
-                </>
-            }
-          </div>
-
-          {/* Column 3: Detail */}
-          <div className="flex-1 overflow-y-auto bg-white px-6 py-5">
+          {/* Detail panel */}
+          <div className="bg-white rounded-2xl border border-gray-200 flex-1 overflow-hidden">
             {!selectedSchema && (
-              <div className="flex items-center justify-center h-full text-gray-400 text-sm">← Select a schema to view its details</div>
+              <div className="flex items-center justify-center h-64 text-gray-400 text-sm">
+                Select a namespace and schema above to view its details
+              </div>
             )}
 
             {detailLoading && (
-              <div className="flex items-center justify-center h-full">
+              <div className="flex items-center justify-center h-64">
                 <svg className="animate-spin w-6 h-6 text-blue-600" fill="none" viewBox="0 0 24 24">
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
@@ -160,68 +159,79 @@ export default function SchemasPage() {
               </div>
             )}
 
-            {detailError && <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-red-700 text-sm">{detailError}</div>}
+            {detailError && (
+              <div className="m-4 bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-red-700 text-sm">{detailError}</div>
+            )}
 
             {detail && !detailLoading && (
-              <div className="flex flex-col gap-6 max-w-4xl">
-                <div>
-                  <h2 className="text-xl font-bold text-gray-900">{detail.label || detail.name}</h2>
-                  <p className="text-sm font-mono text-gray-500">{detail.namespace}:{detail.name}</p>
-                  {detail.desc && <p className="mt-1 text-sm text-gray-600">{detail.desc}</p>}
+              <div className="flex flex-col">
+                {/* Schema header */}
+                <div className="px-6 py-4 border-b border-gray-100 flex items-center gap-4">
+                  <div>
+                    <h2 className="text-lg font-bold text-gray-900">{detail.label || detail.name}</h2>
+                    <p className="text-xs font-mono text-gray-400">{detail.namespace}:{detail.name}</p>
+                  </div>
+                  {detail.desc && <p className="text-sm text-gray-500 ml-4">{detail.desc}</p>}
+                  <div className="ml-auto flex gap-2 text-xs text-gray-400">
+                    {detail.attributes.length > 0 && (
+                      <span className="bg-purple-50 text-purple-600 px-2 py-1 rounded font-medium">{detail.attributes.length} attributes</span>
+                    )}
+                    {detail.elements.length > 0 && (
+                      <span className="bg-blue-50 text-blue-600 px-2 py-1 rounded font-medium">{detail.elements.length} elements</span>
+                    )}
+                  </div>
                 </div>
 
-                {detail.attributes.length > 0 && (
-                  <div>
-                    <h3 className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
-                      <span className="bg-purple-100 text-purple-700 px-2 py-0.5 rounded text-xs font-mono">attributes</span>
-                      <span className="text-gray-400 font-normal text-xs">{detail.attributes.length} fields</span>
-                    </h3>
-                    <div className="border border-gray-200 rounded-lg overflow-hidden">
-                      <table className="w-full text-sm">
-                        <thead className="bg-gray-50 border-b border-gray-200">
-                          <tr>
-                            <th className="text-left px-3 py-2 font-medium text-gray-600 text-xs">Name</th>
-                            <th className="text-left px-3 py-2 font-medium text-gray-600 text-xs">Type</th>
-                            <th className="text-left px-3 py-2 font-medium text-gray-600 text-xs">Label</th>
-                            <th className="text-left px-3 py-2 font-medium text-gray-600 text-xs">Length</th>
-                            <th className="text-left px-3 py-2 font-medium text-gray-600 text-xs">Required</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-100">
-                          {detail.attributes.map((a, i) => (
-                            <tr key={i} className="hover:bg-gray-50">
-                              <td className="px-3 py-2 font-mono text-xs text-purple-700">@{a.name}</td>
-                              <td className="px-3 py-2 font-mono text-xs text-gray-500">{a.type || '—'}</td>
-                              <td className="px-3 py-2 text-gray-800 text-xs">{a.label || '—'}</td>
-                              <td className="px-3 py-2 text-gray-500 text-xs">{a.length || '—'}</td>
-                              <td className="px-3 py-2 text-xs">
-                                {a.required === 'true'
-                                  ? <span className="bg-red-100 text-red-700 px-1.5 py-0.5 rounded text-xs">yes</span>
-                                  : <span className="text-gray-300">—</span>}
-                              </td>
+                <div className="p-6 flex flex-col gap-6 overflow-y-auto" style={{ maxHeight: 'calc(100vh - 280px)' }}>
+                  {/* Attributes table */}
+                  {detail.attributes.length > 0 && (
+                    <div>
+                      <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Attributes</h3>
+                      <div className="border border-gray-200 rounded-lg overflow-hidden">
+                        <table className="w-full text-sm">
+                          <thead className="bg-gray-50 border-b border-gray-200">
+                            <tr>
+                              <th className="text-left px-4 py-2.5 font-medium text-gray-600 text-xs">Name</th>
+                              <th className="text-left px-4 py-2.5 font-medium text-gray-600 text-xs">Type</th>
+                              <th className="text-left px-4 py-2.5 font-medium text-gray-600 text-xs">Label</th>
+                              <th className="text-left px-4 py-2.5 font-medium text-gray-600 text-xs">Length</th>
+                              <th className="text-left px-4 py-2.5 font-medium text-gray-600 text-xs">Required</th>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {detail.attributes.map((a, i) => (
+                              <tr key={i} className="hover:bg-gray-50">
+                                <td className="px-4 py-2.5 font-mono text-xs text-purple-700">@{a.name}</td>
+                                <td className="px-4 py-2.5 font-mono text-xs text-gray-500">{a.type || '—'}</td>
+                                <td className="px-4 py-2.5 text-gray-800 text-xs">{a.label || '—'}</td>
+                                <td className="px-4 py-2.5 text-gray-500 text-xs">{a.length || '—'}</td>
+                                <td className="px-4 py-2.5 text-xs">
+                                  {a.required === 'true'
+                                    ? <span className="bg-red-100 text-red-700 px-1.5 py-0.5 rounded text-xs">yes</span>
+                                    : <span className="text-gray-300">—</span>}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
-                  </div>
-                )}
+                  )}
 
-                {detail.elements.length > 0 && (
-                  <div>
-                    <h3 className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
-                      <span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded text-xs font-mono">elements</span>
-                      <span className="text-gray-400 font-normal text-xs">{detail.elements.length} elements</span>
-                    </h3>
-                    <div className="flex flex-col gap-2">
-                      {detail.elements.map((el, i) => <ElementCard key={i} el={el} depth={0} />)}
+                  {/* Elements */}
+                  {detail.elements.length > 0 && (
+                    <div>
+                      <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Elements</h3>
+                      <div className="flex flex-col gap-2">
+                        {detail.elements.map((el, i) => <ElementCard key={i} el={el} depth={0} />)}
+                      </div>
                     </div>
-                  </div>
-                )}
+                  )}
 
-                {detail.attributes.length === 0 && detail.elements.length === 0 && (
-                  <p className="text-sm text-gray-400">No attributes or elements found in this schema.</p>
-                )}
+                  {detail.attributes.length === 0 && detail.elements.length === 0 && (
+                    <p className="text-sm text-gray-400 py-8 text-center">No attributes or elements found in this schema.</p>
+                  )}
+                </div>
               </div>
             )}
           </div>
