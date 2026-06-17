@@ -77,6 +77,17 @@ export async function uploadDDL(file: File, orgId: string): Promise<{
   return res.json()
 }
 
+export async function clearSchemas(orgId: string): Promise<{ success: boolean; dropped: string[] }> {
+  const res = await fetch(`${BASE}/api/schemas/clear?org_id=${encodeURIComponent(orgId)}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Failed to clear schemas')
+  }
+  return res.json()
+}
+
 export async function getExistingSchemas(orgId: string): Promise<{
   schemas: Array<{ table_name: string; created_at: string; updated_at: string }>
 }> {

@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { ajoConnect, getAjoStatus, getExistingSchemas, uploadDDL } from '../api/client'
+import { ajoConnect, clearSchemas, getAjoStatus, getExistingSchemas, uploadDDL } from '../api/client'
 import { useConfigStore } from '../store/configStore'
 
 export default function AjoPanel() {
@@ -13,6 +13,7 @@ export default function AjoPanel() {
   const [uploadResult, setUploadResult] = useState<{ created: string[]; replaced: string[] } | null>(null)
   const [schemas, setSchemas] = useState<Array<{ table_name: string; created_at: string; updated_at: string }> | null>(null)
   const [loadingSchemas, setLoadingSchemas] = useState(false)
+  const [clearing, setClearing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const { ajoConnected, ajoOrgId, ajoSandboxName, setAjoConnected, setAjoDisconnected } = useConfigStore()
@@ -44,6 +45,23 @@ export default function AjoPanel() {
     } finally {
       setUploading(false)
       if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }
+
+  async function handleClearSchemas() {
+    if (!ajoOrgId) return
+    if (!window.confirm('This will permanently delete all your schemas from the local database. Are you sure?')) return
+    setClearing(true)
+    setError(null)
+    setSchemas(null)
+    setUploadResult(null)
+    try {
+      const res = await clearSchemas(ajoOrgId)
+      setSchemas([])
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to clear schemas')
+    } finally {
+      setClearing(false)
     }
   }
 
@@ -140,6 +158,15 @@ export default function AjoPanel() {
               )}
             </div>
           )}
+
+          {/* Clear all schemas */}
+          <button
+            onClick={handleClearSchemas}
+            disabled={clearing}
+            className="w-full border border-red-200 text-red-500 hover:bg-red-50 font-medium py-2 px-4 rounded-lg transition-colors"
+          >
+            {clearing ? 'Clearing...' : 'Clear all schemas'}
+          </button>
 
           {error && <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">{error}</p>}
 

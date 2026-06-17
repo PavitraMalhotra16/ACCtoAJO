@@ -29,7 +29,7 @@ from acc_soap import (
     parse_schemas,
 )
 from acc_xml_parser import generate_ajo_ddl, parse_acc_file
-from db import AsyncSessionLocal, DestinationConnection, SchemaRegistry, SourceConnection, UserSession, get_db, init_db
+from db import AsyncSessionLocal, DestinationConnection, SchemaRegistry, SourceConnection, UserSession, engine, get_db, init_db
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("acc_backend")
@@ -687,6 +687,49 @@ async def existing_schemas(
             for r in rows
         ]
     }
+
+
+@app.delete("/api/schemas/clear")
+async def clear_schemas(
+    org_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Drop all Postgres tables and registry entries belonging to this org."""
+    result = await db.execute(
+        select(DestinationConnection).where(
+            DestinationConnection.org_id == org_id,
+            DestinationConnection.authenticated == True,
+        )
+    )
+    dest = result.scalar_one_or_none()
+    if not dest:
+        raise HTTPException(401, "AJO not authenticated for this org_id")
+
+    reg_result = await db.execute(
+        select(SchemaRegistry).where(
+            SchemaRegistry.org_id == org_id,
+            SchemaRegistry.client_id == (dest.client_id or ""),
+            SchemaRegistry.sandbox_name == (dest.sandbox_name or ""),
+        )
+    )
+    rows = reg_result.scalars().all()
+
+    if not rows:
+        return {"success": True, "dropped": []}
+
+    dropped = [row.table_name for row in rows]
+
+    # Drop Postgres tables using a raw connection from the shared engine
+    async with engine.begin() as conn:
+        for table_name in dropped:
+            await conn.execute(text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE'))
+
+    # Delete registry entries using the existing db session
+    for row in rows:
+        await db.delete(row)
+
+    log.info("Cleared %d schema(s) for org_id=%s: %s", len(dropped), org_id, dropped)
+    return {"success": True, "dropped": dropped}
 
 
 def _extract_create_stmt(full_ddl: str, table_name: str) -> Optional[str]:
