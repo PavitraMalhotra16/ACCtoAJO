@@ -57,3 +57,33 @@ export async function getAjoStatus(): Promise<{ connected: boolean; org_id: stri
   const res = await fetch(`${BASE}/api/ajo/status`)
   return res.json()
 }
+
+export async function uploadDDL(file: File, orgId: string): Promise<{
+  success: boolean
+  created: string[]
+  replaced: string[]
+  total: number
+}> {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch(`${BASE}/api/schemas/upload?org_id=${encodeURIComponent(orgId)}`, {
+    method: 'POST',
+    body: form,
+  })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Upload failed')
+  }
+  return res.json()
+}
+
+export async function getExistingSchemas(orgId: string): Promise<{
+  schemas: Array<{ table_name: string; created_at: string; updated_at: string }>
+}> {
+  const res = await fetch(`${BASE}/api/schemas/existing?org_id=${encodeURIComponent(orgId)}`)
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Failed to fetch schemas')
+  }
+  return res.json()
+}

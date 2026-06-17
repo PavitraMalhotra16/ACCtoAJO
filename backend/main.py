@@ -10,10 +10,10 @@ load_dotenv()
 import httpx
 import os
 from cryptography.fernet import Fernet
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Response
+from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from acc_soap import (
@@ -28,7 +28,8 @@ from acc_soap import (
     parse_schema_detail,
     parse_schemas,
 )
-from db import DestinationConnection, SourceConnection, UserSession, get_db, init_db, AsyncSessionLocal
+from acc_xml_parser import generate_ajo_ddl, parse_acc_file
+from db import AsyncSessionLocal, DestinationConnection, SchemaRegistry, SourceConnection, UserSession, get_db, init_db
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("acc_backend")
@@ -560,6 +561,144 @@ async def schemas_raw(
             },
         )
     return {"status": resp.status_code, "raw_xml": resp.text}
+
+
+@app.post("/api/schemas/upload")
+async def upload_schema(
+    file: UploadFile = File(...),
+    org_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Accept an ACC DDL file upload, convert to AJO DDL, create tables in Postgres,
+    and register them in the schema_registry master table.
+
+    # FORMAT ASSUMPTION: uploaded file is ACC XML (see acc_xml_parser.py).
+    # If the format changes, update acc_xml_parser.parse_acc_file().
+    """
+    result = await db.execute(
+        select(DestinationConnection).where(
+            DestinationConnection.org_id == org_id,
+            DestinationConnection.authenticated == True,
+        )
+    )
+    dest = result.scalar_one_or_none()
+    if not dest:
+        raise HTTPException(401, "AJO not authenticated for this org_id")
+
+    content = await file.read()
+
+    try:
+        tables = parse_acc_file(content)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+    ddl_sql = generate_ajo_ddl(tables)
+    log.info("Generated AJO DDL for %d table(s)", len(tables))
+
+    created = []
+    replaced = []
+    now = datetime.now(timezone.utc)
+
+    async with AsyncSessionLocal() as raw_conn:
+        async with raw_conn.begin():
+            for table in tables:
+                table_name = table["table_name"]
+
+                # Check if already registered for this user
+                reg_result = await raw_conn.execute(
+                    select(SchemaRegistry).where(
+                        SchemaRegistry.org_id == org_id,
+                        SchemaRegistry.client_id == (dest.client_id or ""),
+                        SchemaRegistry.sandbox_name == (dest.sandbox_name or ""),
+                        SchemaRegistry.table_name == table_name,
+                    )
+                )
+                existing_reg = reg_result.scalar_one_or_none()
+
+                # Drop existing table if it exists (upsert behaviour)
+                await raw_conn.execute(text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE'))
+
+                # Find and execute the CREATE TABLE for this specific table
+                create_stmt = _extract_create_stmt(ddl_sql, table_name)
+                if create_stmt:
+                    await raw_conn.execute(text(create_stmt))
+
+                # Update or insert master table entry
+                if existing_reg:
+                    existing_reg.updated_at = now
+                    replaced.append(table_name)
+                else:
+                    raw_conn.add(SchemaRegistry(
+                        org_id=org_id,
+                        client_id=dest.client_id or "",
+                        sandbox_name=dest.sandbox_name or "",
+                        table_name=table_name,
+                        source_schema_name=table_name,
+                        created_at=now,
+                        updated_at=now,
+                    ))
+                    created.append(table_name)
+
+        await raw_conn.commit()
+
+    log.info("Schema upload done — created: %s, replaced: %s", created, replaced)
+    return {
+        "success": True,
+        "created": created,
+        "replaced": replaced,
+        "total": len(tables),
+        "ddl_preview": ddl_sql[:2000],
+    }
+
+
+@app.get("/api/schemas/existing")
+async def existing_schemas(
+    org_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return all tables registered for the given org_id."""
+    result = await db.execute(
+        select(DestinationConnection).where(
+            DestinationConnection.org_id == org_id,
+            DestinationConnection.authenticated == True,
+        )
+    )
+    dest = result.scalar_one_or_none()
+    if not dest:
+        raise HTTPException(401, "AJO not authenticated for this org_id")
+
+    reg_result = await db.execute(
+        select(SchemaRegistry).where(
+            SchemaRegistry.org_id == org_id,
+            SchemaRegistry.client_id == (dest.client_id or ""),
+            SchemaRegistry.sandbox_name == (dest.sandbox_name or ""),
+        )
+    )
+    rows = reg_result.scalars().all()
+
+    return {
+        "schemas": [
+            {
+                "table_name": r.table_name,
+                "created_at": r.created_at.isoformat(),
+                "updated_at": r.updated_at.isoformat(),
+            }
+            for r in rows
+        ]
+    }
+
+
+def _extract_create_stmt(full_ddl: str, table_name: str) -> Optional[str]:
+    """Extract the CREATE TABLE block for a specific table from the full DDL string."""
+    marker = f"CREATE TABLE {table_name}"
+    start = full_ddl.find(marker)
+    if start == -1:
+        return None
+    end = full_ddl.find(");", start)
+    if end == -1:
+        return None
+    return full_ddl[start:end + 2]
 
 
 @app.get("/health")

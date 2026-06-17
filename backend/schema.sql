@@ -37,3 +37,17 @@ CREATE TABLE IF NOT EXISTS user_sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_sessions_login_id ON user_sessions (login_id);
+
+-- Master table: tracks which Postgres tables were created for each AJO user.
+-- Used to show "existing schemas" and enforce DROP+recreate on re-upload.
+CREATE TABLE IF NOT EXISTS schema_registry (
+    id                  TEXT        PRIMARY KEY,
+    org_id              VARCHAR(255) NOT NULL,
+    client_id           VARCHAR(255) NOT NULL,
+    sandbox_name        VARCHAR(255) NOT NULL,
+    table_name          VARCHAR(255) NOT NULL,
+    source_schema_name  VARCHAR(255),
+    created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    UNIQUE (org_id, client_id, sandbox_name, table_name)
+);
