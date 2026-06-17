@@ -732,6 +732,65 @@ async def clear_schemas(
     return {"success": True, "dropped": dropped}
 
 
+@app.get("/api/schemas/{table_name}/columns")
+async def get_table_columns(
+    table_name: str,
+    org_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return column names and data types for a specific table."""
+    reg = await db.execute(
+        select(SchemaRegistry).where(
+            SchemaRegistry.org_id == org_id,
+            SchemaRegistry.table_name == table_name,
+        )
+    )
+    if not reg.scalar_one_or_none():
+        raise HTTPException(404, "Table not found in registry for this org")
+
+    result = await db.execute(text("""
+        SELECT column_name, data_type, character_maximum_length, is_nullable
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = :table_name
+        ORDER BY ordinal_position
+    """), {"table_name": table_name})
+
+    columns = [
+        {
+            "column_name": row[0],
+            "data_type": f"{row[1]}({row[2]})" if row[2] else row[1],
+            "nullable": row[3] == "YES",
+        }
+        for row in result.fetchall()
+    ]
+    return {"columns": columns}
+
+
+@app.delete("/api/schemas/{table_name}")
+async def delete_schema(
+    table_name: str,
+    org_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Drop a single Postgres table and remove its registry entry."""
+    reg_result = await db.execute(
+        select(SchemaRegistry).where(
+            SchemaRegistry.org_id == org_id,
+            SchemaRegistry.table_name == table_name,
+        )
+    )
+    reg = reg_result.scalar_one_or_none()
+    if not reg:
+        raise HTTPException(404, "Table not found in registry for this org")
+
+    async with engine.begin() as conn:
+        await conn.execute(text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE'))
+
+    await db.delete(reg)
+    log.info("Deleted schema '%s' for org_id=%s", table_name, org_id)
+    return {"success": True, "dropped": table_name}
+
+
 def _extract_create_stmt(full_ddl: str, table_name: str) -> Optional[str]:
     """Extract the CREATE TABLE block for a specific table from the full DDL string."""
     marker = f"CREATE TABLE {table_name}"

@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { ajoConnect, clearSchemas, getAjoStatus, getExistingSchemas, uploadDDL } from '../api/client'
+import { ajoConnect, clearSchemas, deleteSchema, getAjoStatus, getExistingSchemas, getTableColumns, uploadDDL } from '../api/client'
 import { useConfigStore } from '../store/configStore'
 
 export default function AjoPanel() {
@@ -14,6 +14,9 @@ export default function AjoPanel() {
   const [schemas, setSchemas] = useState<Array<{ table_name: string; created_at: string; updated_at: string }> | null>(null)
   const [loadingSchemas, setLoadingSchemas] = useState(false)
   const [clearing, setClearing] = useState(false)
+  const [expandedTables, setExpandedTables] = useState<Record<string, boolean>>({})
+  const [tableColumns, setTableColumns] = useState<Record<string, Array<{ column_name: string; data_type: string; nullable: boolean }>>>({})
+  const [deletingTable, setDeletingTable] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const { ajoConnected, ajoOrgId, ajoSandboxName, setAjoConnected, setAjoDisconnected } = useConfigStore()
@@ -45,6 +48,34 @@ export default function AjoPanel() {
     } finally {
       setUploading(false)
       if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }
+
+  async function handleToggleTable(tableName: string) {
+    const isOpen = expandedTables[tableName]
+    setExpandedTables(prev => ({ ...prev, [tableName]: !isOpen }))
+    if (!isOpen && !tableColumns[tableName] && ajoOrgId) {
+      try {
+        const res = await getTableColumns(tableName, ajoOrgId)
+        setTableColumns(prev => ({ ...prev, [tableName]: res.columns }))
+      } catch {
+        // silently fail — toggle will still open, just no columns
+      }
+    }
+  }
+
+  async function handleDeleteTable(tableName: string) {
+    if (!ajoOrgId) return
+    setDeletingTable(tableName)
+    try {
+      await deleteSchema(tableName, ajoOrgId)
+      setSchemas(prev => prev ? prev.filter(s => s.table_name !== tableName) : prev)
+      setExpandedTables(prev => { const n = { ...prev }; delete n[tableName]; return n })
+      setTableColumns(prev => { const n = { ...prev }; delete n[tableName]; return n })
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to delete schema')
+    } finally {
+      setDeletingTable(null)
     }
   }
 
@@ -143,15 +174,61 @@ export default function AjoPanel() {
           </button>
 
           {schemas !== null && (
-            <div className="text-sm bg-gray-50 border border-gray-200 rounded-lg px-4 py-3">
+            <div className="text-sm bg-gray-50 border border-gray-200 rounded-lg overflow-hidden">
               {schemas.length === 0 ? (
-                <p className="text-gray-500">No schemas found for this account.</p>
+                <p className="text-gray-500 px-4 py-3">No schemas found for this account.</p>
               ) : (
-                <ul className="space-y-1">
+                <ul className="divide-y divide-gray-100">
                   {schemas.map(s => (
-                    <li key={s.table_name} className="flex justify-between">
-                      <span className="font-mono font-medium">{s.table_name}</span>
-                      <span className="text-gray-400 text-xs">{new Date(s.updated_at).toLocaleDateString()}</span>
+                    <li key={s.table_name}>
+                      <div className="flex items-center gap-2 px-3 py-2">
+                        {/* Toggle */}
+                        <button
+                          onClick={() => handleToggleTable(s.table_name)}
+                          className={`relative w-8 h-4 rounded-full transition-colors flex-shrink-0 ${expandedTables[s.table_name] ? 'bg-blue-500' : 'bg-gray-300'}`}
+                        >
+                          <span className={`absolute top-0.5 w-3 h-3 bg-white rounded-full shadow transition-transform ${expandedTables[s.table_name] ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                        </button>
+                        {/* Table name */}
+                        <span className="font-mono font-medium flex-1">{s.table_name}</span>
+                        {/* Date */}
+                        <span className="text-gray-400 text-xs mr-2">{new Date(s.updated_at).toLocaleDateString()}</span>
+                        {/* Delete button */}
+                        <button
+                          onClick={() => handleDeleteTable(s.table_name)}
+                          disabled={deletingTable === s.table_name}
+                          className="text-xs text-red-500 hover:text-red-700 border border-red-200 hover:bg-red-50 px-2 py-0.5 rounded transition-colors disabled:opacity-50"
+                        >
+                          {deletingTable === s.table_name ? '...' : 'Delete'}
+                        </button>
+                      </div>
+                      {/* Expanded columns */}
+                      {expandedTables[s.table_name] && (
+                        <div className="px-4 pb-2 bg-white border-t border-gray-100">
+                          {tableColumns[s.table_name] ? (
+                            <table className="w-full text-xs mt-1">
+                              <thead>
+                                <tr className="text-gray-400">
+                                  <th className="text-left py-1 font-medium">Column</th>
+                                  <th className="text-left py-1 font-medium">Type</th>
+                                  <th className="text-left py-1 font-medium">Nullable</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {tableColumns[s.table_name].map(col => (
+                                  <tr key={col.column_name} className="border-t border-gray-50">
+                                    <td className="py-1 font-mono">{col.column_name}</td>
+                                    <td className="py-1 text-blue-600">{col.data_type}</td>
+                                    <td className="py-1 text-gray-400">{col.nullable ? 'yes' : 'no'}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          ) : (
+                            <p className="text-gray-400 py-1">Loading columns...</p>
+                          )}
+                        </div>
+                      )}
                     </li>
                   ))}
                 </ul>

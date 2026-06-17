@@ -77,6 +77,28 @@ export async function uploadDDL(file: File, orgId: string): Promise<{
   return res.json()
 }
 
+export async function getTableColumns(tableName: string, orgId: string): Promise<{
+  columns: Array<{ column_name: string; data_type: string; nullable: boolean }>
+}> {
+  const res = await fetch(`${BASE}/api/schemas/${encodeURIComponent(tableName)}/columns?org_id=${encodeURIComponent(orgId)}`)
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Failed to fetch columns')
+  }
+  return res.json()
+}
+
+export async function deleteSchema(tableName: string, orgId: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${BASE}/api/schemas/${encodeURIComponent(tableName)}?org_id=${encodeURIComponent(orgId)}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Failed to delete schema')
+  }
+  return res.json()
+}
+
 export async function clearSchemas(orgId: string): Promise<{ success: boolean; dropped: string[] }> {
   const res = await fetch(`${BASE}/api/schemas/clear?org_id=${encodeURIComponent(orgId)}`, {
     method: 'DELETE',
