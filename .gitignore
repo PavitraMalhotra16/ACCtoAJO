@@ -1,0 +1,37 @@
+# Environment variables - NEVER commit these
+.env
+*.env
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Node / frontend
+node_modules/
+frontend_app/node_modules/
+frontend_app/dist/
+frontend_app/.vite/
+
+# Schema output files (user data)
+schema_files/
+
+# Temp/clone folders
+_acc_clone/
+_repo_clone/
+acc_push_temp/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude worktrees
+.claude/worktrees/

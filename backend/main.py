@@ -1,0 +1,56 @@
+import logging
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import select
+
+from db import UserSession, init_db, AsyncSessionLocal
+from config import settings
+from routes.auth import router as auth_router
+from routes.schemas import router as schemas_router
+from routes.conversion import router as conversion_router
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("acc_backend")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(UserSession).where(UserSession.expires_at < datetime.now(timezone.utc))
+        )
+        expired = result.scalars().all()
+        for s in expired:
+            await db.delete(s)
+        await db.commit()
+        if expired:
+            log.info("Cleaned up %d expired session(s)", len(expired))
+    log.info("DB ready")
+    yield
+
+
+app = FastAPI(title="ACC→AJO Migration Backend", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(auth_router)
+app.include_router(schemas_router)
+app.include_router(conversion_router)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
