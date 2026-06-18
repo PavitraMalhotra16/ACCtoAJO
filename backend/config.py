@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     # CORS – comma-separated origins
     cors_origins_raw: str = "http://localhost:3000,http://localhost:5173"
 
+    # Schema storage
+    schema_storage_dir: str = "schema_files"
+
     # General
     debug: bool = False
 
@@ -34,7 +37,7 @@ class Settings(BaseSettings):
     )
 
     @property
-    def cors_origins(self) -> List[str]:
+    def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.cors_origins_raw.split(",") if o.strip()]
 
 
