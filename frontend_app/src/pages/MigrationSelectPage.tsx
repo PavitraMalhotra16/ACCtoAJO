@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getSchemas } from '../api/client'
-import { startConversion } from '../api/migration'
+// startConversion removed — page is no longer routed; kept for reference only
 
 interface SchemaEntry { namespace: string; name: string; label: string }
 
@@ -51,16 +51,12 @@ export default function MigrationSelectPage() {
   }
 
   async function handleNext() {
+    // This page is no longer actively routed; kept as reference only
     const chosen = schemas.filter(s => selected.has(key(s)))
     if (!chosen.length) return
     setStarting(true)
-    try {
-      const { job_id } = await startConversion(chosen)
-      navigate(`/migration/run?job=${job_id}`)
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Failed to start')
-      setStarting(false)
-    }
+    setError('This page is no longer in use. Please use the Migrate button on the home page.')
+    setStarting(false)
   }
 
   return (

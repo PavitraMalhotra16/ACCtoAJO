@@ -1,52 +1,32 @@
-// Types and API calls for the ACC → JSON conversion flow
-
-export interface SchemaEntry {
-  namespace: string
-  name: string
-  label: string
-}
-
-export interface ConversionStep {
-  schemaName: string
-  status: 'running' | 'success' | 'failed'
-  error: string | null
-}
-
-export interface ConversionJob {
+export interface MigrationSchemaItem {
   id: string
-  status: 'pending' | 'running' | 'completed' | 'failed'
-  schema_count: number
-  skipped_count: number
-  current_schema: string | null
-  success_count: number
-  failed_count: number
-  steps: ConversionStep[]
+  schema_name: string
+  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED'
+  current_step: string | null
+  current_step_order: number
+  identity_is_primary: boolean | null
+  error_message: string | null
+  completed_at: string | null
 }
 
-export async function startConversionAll(): Promise<{ job_id: string | null; message: string; total: number; skipped: number }> {
-  const res = await fetch('/api/convert/start-all', {
-    method: 'POST',
-    credentials: 'include',
-  })
-  if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Failed to start') }
+export interface MigrationJob {
+  job_id: string
+  total: number
+  completed: number
+  running: number
+  queued: number
+  failed: number
+  schemas: MigrationSchemaItem[]
+}
+
+export async function startMigration(): Promise<{ job_id: string; message: string; total: number; queued: number; skipped: number }> {
+  const res = await fetch('/api/migrate/start', { method: 'POST', credentials: 'include' })
+  if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Failed to start migration') }
   return res.json()
 }
 
-export async function startConversion(
-  schemas: Array<{ namespace: string; name: string; label?: string }>
-): Promise<{ job_id: string }> {
-  const res = await fetch('/api/convert/start', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify({ schemas }),
-  })
-  if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Failed to start') }
-  return res.json()
-}
-
-export async function getConversionStatus(jobId: string): Promise<ConversionJob> {
-  const res = await fetch(`/api/convert/status/${jobId}`, { credentials: 'include' })
+export async function getMigrationStatus(jobId: string): Promise<MigrationJob> {
+  const res = await fetch(`/api/migrate/status/${jobId}`, { credentials: 'include' })
   if (!res.ok) throw new Error('Job not found')
   return res.json()
 }
