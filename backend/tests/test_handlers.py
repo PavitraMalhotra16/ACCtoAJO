@@ -163,11 +163,11 @@ async def test_fetch_tenant_id_uses_cache():
     assert result["tenantId"] == "_acmecorp"
 
 
-# ── BUILD_PAYLOAD ─────────────────────────────────────────────────────────────
+# ── MAKE_ENRICHED_JSON ────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_build_payload_record_behavior():
-    from pipeline.handlers import build_payload
+async def test_make_enriched_json_record_behavior():
+    from pipeline.handlers import make_enriched_json as build_payload
     data = {
         "source": {"fullName": "cus:recipient", "name": "recipient"},
         "schema": {"label": "Recipients", "description": "All recipients"},
@@ -198,8 +198,8 @@ async def test_build_payload_record_behavior():
 
 
 @pytest.mark.asyncio
-async def test_build_payload_time_series_behavior():
-    from pipeline.handlers import build_payload
+async def test_make_enriched_json_time_series_behavior():
+    from pipeline.handlers import make_enriched_json as build_payload
     data = {
         "source": {"fullName": "cus:trackingLog", "name": "trackingLog"},
         "schema": {"label": "Tracking Log", "description": ""},
@@ -222,8 +222,8 @@ async def test_build_payload_time_series_behavior():
 
 
 @pytest.mark.asyncio
-async def test_build_payload_relationships():
-    from pipeline.handlers import build_payload
+async def test_make_enriched_json_relationships():
+    from pipeline.handlers import make_enriched_json as build_payload
     data = {
         "source": {"fullName": "cus:order"},
         "schema": {"label": "Orders", "description": ""},
@@ -247,16 +247,146 @@ async def test_build_payload_relationships():
     assert rels[0]["cardinality"] == "many-to-one"
 
 
-# ── STUBS ────────────────────────────────────────────────────────────────────
+# ── AEP PUSH STEPS (6–12) ─────────────────────────────────────────────────────
+
+AUTH = {"token": "tok", "client_id": "key", "org_id": "O@AdobeOrg", "sandbox": "prod"}
+
+
+def _resp(status, body=None):
+    r = MagicMock()
+    r.status_code = status
+    r.json.return_value = body if body is not None else {}
+    r.text = json.dumps(body if body is not None else {})
+    return r
+
+
+def _fake_client(get=None, post=None, patch_resp=None):
+    client = AsyncMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    if get is not None:
+        client.get = AsyncMock(return_value=get)
+    if post is not None:
+        client.post = AsyncMock(return_value=post)
+    if patch_resp is not None:
+        client.patch = AsyncMock(return_value=patch_resp)
+    return client
+
+
+# ── Helpers ──
+
+def test_class_ref_mapping():
+    from pipeline.handlers import _class_ref
+    assert _class_ref("record").endswith("/context/profile")
+    assert _class_ref("time-series").endswith("/context/experienceevent")
+
+
+def test_tenant_key_normalizes_underscore():
+    from pipeline.handlers import _tenant_key, _source_property_path
+    assert _tenant_key("acmecorp") == "_acmecorp"
+    assert _tenant_key("_acmecorp") == "_acmecorp"          # no double underscore
+    assert _source_property_path("_acmecorp", "crmId") == "/_acmecorp/crmId"
+
+
+def test_description_synthesized_when_blank():
+    from pipeline.handlers import _description
+    assert _description({"description": ""}, "cus:members") == "this table is about cus:members"
+    assert _description({"description": "Real desc"}, "cus:members") == "Real desc"
+
+
+# ── Step 6: CALL_SCHEMA_API ──
 
 @pytest.mark.asyncio
-async def test_stubs_pass_data_through():
-    from pipeline.handlers import (
-        call_schema_api_stub,
-        call_identity_descriptor_stub,
-        verify_stub,
+async def test_call_schema_api_reuses_existing_by_title():
+    from pipeline.handlers import call_schema_api
+    data = {"ajoPayload": {"title": "Members", "behavior": "record", "fields": []}}
+    client = _fake_client(get=_resp(200, {"results": [{"title": "Members", "$id": "https://ns.adobe.com/_t/schemas/abc"}]}))
+    with patch("pipeline.handlers._aep_auth", AsyncMock(return_value=AUTH)), \
+         patch("pipeline.handlers.httpx.AsyncClient", return_value=client):
+        out = await call_schema_api({"org_id": "O", "schema_name": "Members"}, data)
+    assert out["schemaId"] == "https://ns.adobe.com/_t/schemas/abc"
+    client.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_call_schema_api_creates_when_absent():
+    from pipeline.handlers import call_schema_api
+    data = {"ajoPayload": {"title": "Members", "behavior": "record", "fields": []}}
+    client = _fake_client(
+        get=_resp(200, {"results": []}),
+        post=_resp(201, {"$id": "https://ns.adobe.com/_t/schemas/new"}),
     )
-    original = {"tenantId": "_test", "ajoPayload": {"title": "Test"}}
-    for stub in [call_schema_api_stub, call_identity_descriptor_stub, verify_stub]:
-        result = await stub({}, dict(original))
-        assert result["tenantId"] == "_test"
+    with patch("pipeline.handlers._aep_auth", AsyncMock(return_value=AUTH)), \
+         patch("pipeline.handlers.httpx.AsyncClient", return_value=client):
+        out = await call_schema_api({"org_id": "O", "schema_name": "Members"}, data)
+    assert out["schemaId"].endswith("/new")
+    assert out["schemaClassRef"].endswith("/context/profile")
+
+
+# ── Step 8: ATTACH_FIELDGROUP — schema $id must be URL-encoded in the path ──
+
+@pytest.mark.asyncio
+async def test_attach_fieldgroup_url_encodes_schema_id():
+    from pipeline.handlers import attach_fieldgroup
+    data = {
+        "schemaId": "https://ns.adobe.com/_t/schemas/abc",
+        "fieldGroupId": "https://ns.adobe.com/_t/mixins/fg",
+    }
+    client = _fake_client(get=_resp(200, {"allOf": []}), patch_resp=_resp(200, {}))
+    with patch("pipeline.handlers._aep_auth", AsyncMock(return_value=AUTH)), \
+         patch("pipeline.handlers.httpx.AsyncClient", return_value=client):
+        await attach_fieldgroup({"org_id": "O"}, data)
+    patch_url = client.patch.call_args.args[0]
+    assert "%3A" in patch_url and "%2F" in patch_url   # ':' and '/' encoded
+
+
+@pytest.mark.asyncio
+async def test_attach_fieldgroup_skips_if_already_attached():
+    from pipeline.handlers import attach_fieldgroup
+    fg = "https://ns.adobe.com/_t/mixins/fg"
+    data = {"schemaId": "https://ns.adobe.com/_t/schemas/abc", "fieldGroupId": fg}
+    client = _fake_client(get=_resp(200, {"allOf": [{"$ref": fg}]}))
+    with patch("pipeline.handlers._aep_auth", AsyncMock(return_value=AUTH)), \
+         patch("pipeline.handlers.httpx.AsyncClient", return_value=client):
+        await attach_fieldgroup({"org_id": "O"}, data)
+    client.patch.assert_not_called()
+
+
+# ── Step 9: ENSURE_NAMESPACE ──
+
+@pytest.mark.asyncio
+async def test_ensure_namespace_skips_when_no_identity():
+    from pipeline.handlers import ensure_namespace
+    data = {"ajoPayload": {"identityNamespace": "CrmId"}, "identityDecision": {"isPrimary": None}}
+    out = await ensure_namespace({"org_id": "O", "schema_name": "X"}, data)
+    assert out["namespaceSkipped"] is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_namespace_reuses_existing_code():
+    from pipeline.handlers import ensure_namespace
+    data = {"ajoPayload": {"identityNamespace": "CrmId"}, "identityDecision": {"isPrimary": True}}
+    client = _fake_client(get=_resp(200, [{"code": "CrmId"}, {"code": "Email"}]))
+    with patch("pipeline.handlers._aep_auth", AsyncMock(return_value=AUTH)), \
+         patch("pipeline.handlers.httpx.AsyncClient", return_value=client):
+        out = await ensure_namespace({"org_id": "O", "schema_name": "X"}, data)
+    assert out["namespaceCode"] == "CrmId"
+    client.post.assert_not_called()
+
+
+# ── Step 11: ENABLE_PROFILE_UNION ──
+
+@pytest.mark.asyncio
+async def test_enable_union_skipped_when_not_primary():
+    from pipeline.handlers import enable_profile_union
+    data = {"identityDecision": {"isPrimary": False}, "schemaId": "x"}
+    out = await enable_profile_union({"org_id": "O", "schema_name": "X"}, data)
+    assert out == data  # returned unchanged, no API call
+
+
+@pytest.mark.asyncio
+async def test_descriptor_skipped_when_namespace_skipped():
+    from pipeline.handlers import call_identity_descriptor
+    data = {"namespaceSkipped": True}
+    out = await call_identity_descriptor({"org_id": "O", "schema_name": "X"}, data)
+    assert out == data

@@ -16,12 +16,16 @@ const STEP_LABELS: Record<string, string> = {
   MAP_TYPES: 'Mapping types',
   RESOLVE_IDENTITY: 'Resolving identity',
   FETCH_TENANT_ID: 'Fetching tenant ID',
-  BUILD_PAYLOAD: 'Building payload',
+  MAKE_ENRICHED_JSON: 'Building enriched input JSON',
   CALL_SCHEMA_API: 'Creating schema in AEP',
+  CALL_FIELDGROUP_API: 'Creating field group',
+  ATTACH_FIELDGROUP: 'Attaching field group',
+  ENSURE_NAMESPACE: 'Checking identity namespace',
   CALL_IDENTITY_DESCRIPTOR_API: 'Registering identity',
+  ENABLE_PROFILE_UNION: 'Enabling Profile (union)',
   VERIFY: 'Verifying',
 }
-const TOTAL_STEPS = 8
+const TOTAL_STEPS = 12
 
 type Phase = 'extracting' | 'migrating' | 'done'
 

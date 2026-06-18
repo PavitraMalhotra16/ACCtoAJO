@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     # Schema storage
     schema_storage_dir: str = "schema_files"
 
+    # Adobe Experience Platform hosts
+    # Schema Registry uses the global host; Identity Service is region-specific
+    # (va7 = North America, nld2 = EMEA). Override identity_host for non-NA orgs.
+    aep_schema_registry_host: str = "https://platform.adobe.io"
+    identity_host: str = "https://platform-va7.adobe.io"
+
     # General
     debug: bool = False
 

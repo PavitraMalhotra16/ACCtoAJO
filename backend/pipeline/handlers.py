@@ -1,11 +1,13 @@
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from config import settings
 from db import AsyncSessionLocal, ConvertedSchema, DestinationConnection, TenantConfig
 from core.security import decrypt, encrypt
 
@@ -277,7 +279,7 @@ async def fetch_tenant_id(ctx: dict, data: dict) -> dict:
     return data
 
 
-async def build_payload(ctx: dict, data: dict) -> dict:
+async def make_enriched_json(ctx: dict, data: dict) -> dict:
     source = data.get("source", {})
     schema_meta = data.get("schema", {})
     root = data.get("rootElement", {})
@@ -315,13 +317,426 @@ async def build_payload(ctx: dict, data: dict) -> dict:
     return data
 
 
-async def call_schema_api_stub(ctx: dict, data: dict) -> dict:
+# ──────────────────────────────────────────────────────────────────────────────
+# AEP push helpers (steps 6–12)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _schema_registry_base() -> str:
+    return f"{settings.aep_schema_registry_host}/data/foundation/schemaregistry"
+
+
+async def _aep_auth(org_id: str) -> dict:
+    """Resolve a valid access token + the header values for AEP API calls."""
+    async with AsyncSessionLocal() as db:
+        dest_result = await db.execute(
+            select(DestinationConnection).where(DestinationConnection.org_id == org_id)
+        )
+        dest = dest_result.scalar_one_or_none()
+        if not dest or not dest.encrypted_access_token:
+            raise ValueError(f"No AJO credentials found for org {org_id}")
+        if not dest.client_id:
+            raise ValueError(f"No client_id (API key) found for org {org_id}")
+        token = await get_valid_access_token(dest, db)
+        return {
+            "token": token,
+            "client_id": dest.client_id,
+            "org_id": org_id,
+            "sandbox": (dest.sandbox_name or "prod").strip(),
+        }
+
+
+def _sr_headers(auth: dict, *, content_type: bool = False, accept: str | None = None) -> dict:
+    headers = {
+        "Authorization": f"Bearer {auth['token']}",
+        "x-api-key": auth["client_id"],
+        "x-gw-ims-org-id": auth["org_id"],
+        "x-sandbox-name": auth["sandbox"],
+    }
+    if content_type:
+        headers["Content-Type"] = "application/json"
+    if accept:
+        headers["Accept"] = accept
+    return headers
+
+
+def _class_ref(behavior: str) -> str:
+    if behavior == "time-series":
+        return "https://ns.adobe.com/xdm/context/experienceevent"
+    return "https://ns.adobe.com/xdm/context/profile"
+
+
+def _coerce_input_json(value) -> dict:
+    """Defensive parse — input is normally JSON but may arrive as a plain string."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Input JSON is not valid JSON: {exc}") from exc
+    raise ValueError("Input JSON is missing or not an object")
+
+
+async def _get_input_json(ctx: dict, data: dict) -> dict:
+    """Read the enriched input JSON — from in-memory payload, else the DB column."""
+    payload = data.get("ajoPayload")
+    if isinstance(payload, dict):
+        return payload
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(ConvertedSchema).where(ConvertedSchema.id == ctx["converted_schema_id"])
+        )
+        cs = result.scalar_one()
+    if not cs.enriched_json:
+        raise ValueError("No enriched input JSON available — MAKE_ENRICHED_JSON must run first")
+    return _coerce_input_json(cs.enriched_json)
+
+
+def _description(input_json: dict, schema_name: str) -> str:
+    desc = (input_json.get("description") or "").strip()
+    return desc or f"this table is about {schema_name}"
+
+
+def _tenant_key(tenant_id: str) -> str:
+    """Custom-fields namespace key — always exactly one leading underscore,
+    whether or not the stored tenant ID already includes it."""
+    return "_" + tenant_id.lstrip("_")
+
+
+def _source_property_path(tenant_id: str, primary_key: str) -> str:
+    return f"/{_tenant_key(tenant_id)}/{primary_key}"
+
+
+def _xdm_field(field: dict) -> dict:
+    name = field.get("name")
+    title = field.get("title") or name
+    prop: dict = {"title": title, "type": field.get("type", "string")}
+    if field.get("format"):
+        prop["format"] = field["format"]
+    prop["description"] = field.get("description") or f"{title} field migrated from Adobe Campaign."
+    return prop
+
+
+def _listing_results(body) -> list:
+    if isinstance(body, dict):
+        return body.get("results", [])
+    return body if isinstance(body, list) else []
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 6: create the schema (class only) → schema $id
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def call_schema_api(ctx: dict, data: dict) -> dict:
+    input_json = await _get_input_json(ctx, data)
+    title = input_json.get("title") or ctx["schema_name"]
+    description = _description(input_json, ctx["schema_name"])
+    behavior = input_json.get("behavior", "record")
+    class_ref = _class_ref(behavior)
+    data["schemaClassRef"] = class_ref
+
+    auth = await _aep_auth(ctx["org_id"])
+    base = _schema_registry_base()
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # Idempotency: reuse an existing schema with the same title
+        existing = await client.get(
+            f"{base}/tenant/schemas",
+            headers=_sr_headers(auth, accept="application/vnd.adobe.xed-id+json"),
+        )
+        if existing.status_code == 200:
+            for item in _listing_results(existing.json()):
+                if item.get("title") == title:
+                    data["schemaId"] = item["$id"]
+                    data["schemaTitle"] = title
+                    log.info("Schema %r already exists — reusing %s", title, item["$id"])
+                    return data
+
+        resp = await client.post(
+            f"{base}/tenant/schemas",
+            headers=_sr_headers(auth, content_type=True),
+            json={
+                "type": "object",
+                "title": title,
+                "description": description,
+                "allOf": [{"$ref": class_ref}],
+            },
+        )
+
+    if resp.status_code not in (200, 201):
+        raise ValueError(f"Create schema failed ({resp.status_code}): {resp.text[:300]}")
+    schema_id = resp.json().get("$id")
+    if not schema_id:
+        raise ValueError("Schema create response missing $id")
+    data["schemaId"] = schema_id
+    data["schemaTitle"] = title
+    log.info("Created schema %r → %s", title, schema_id)
     return data
 
 
-async def call_identity_descriptor_stub(ctx: dict, data: dict) -> dict:
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 7: create the custom field group (fields under _{TENANT_ID}) → fieldgroup $id
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def call_fieldgroup_api(ctx: dict, data: dict) -> dict:
+    input_json = await _get_input_json(ctx, data)
+    tenant_id = data.get("tenantId")
+    if not tenant_id:
+        raise ValueError("tenantId missing — FETCH_TENANT_ID must run first")
+
+    class_ref = data.get("schemaClassRef") or _class_ref(input_json.get("behavior", "record"))
+    title = f"{input_json.get('title') or ctx['schema_name']} Fields"
+    fields = input_json.get("fields", [])
+    tenant_key = _tenant_key(tenant_id)
+    properties = {f["name"]: _xdm_field(f) for f in fields if f.get("name")}
+
+    payload = {
+        "type": "object",
+        "title": title,
+        "description": _description(input_json, ctx["schema_name"]),
+        "meta:intendedToExtend": [class_ref],
+        "definitions": {
+            "campaignFields": {
+                "properties": {
+                    tenant_key: {"type": "object", "properties": properties}
+                }
+            }
+        },
+        "allOf": [{"$ref": "#/definitions/campaignFields"}],
+    }
+
+    auth = await _aep_auth(ctx["org_id"])
+    base = _schema_registry_base()
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        existing = await client.get(
+            f"{base}/tenant/fieldgroups",
+            headers=_sr_headers(auth, accept="application/vnd.adobe.xed-id+json"),
+        )
+        if existing.status_code == 200:
+            for item in _listing_results(existing.json()):
+                if item.get("title") == title:
+                    data["fieldGroupId"] = item["$id"]
+                    log.info("Field group %r already exists — reusing %s", title, item["$id"])
+                    return data
+
+        resp = await client.post(
+            f"{base}/tenant/fieldgroups",
+            headers=_sr_headers(auth, content_type=True),
+            json=payload,
+        )
+
+    if resp.status_code not in (200, 201):
+        raise ValueError(f"Create field group failed ({resp.status_code}): {resp.text[:300]}")
+    fg_id = resp.json().get("$id")
+    if not fg_id:
+        raise ValueError("Field group create response missing $id")
+    data["fieldGroupId"] = fg_id
+    log.info("Created field group %r → %s", title, fg_id)
     return data
 
 
-async def verify_stub(ctx: dict, data: dict) -> dict:
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 8: attach the field group to the schema (schema $id is URL-encoded in path)
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def attach_fieldgroup(ctx: dict, data: dict) -> dict:
+    schema_id = data.get("schemaId")
+    fg_id = data.get("fieldGroupId")
+    if not schema_id or not fg_id:
+        raise ValueError("schemaId or fieldGroupId missing — steps 6 and 7 must run first")
+
+    auth = await _aep_auth(ctx["org_id"])
+    base = _schema_registry_base()
+    encoded = quote(schema_id, safe="")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        current = await client.get(
+            f"{base}/tenant/schemas/{encoded}",
+            headers=_sr_headers(auth, accept="application/vnd.adobe.xed+json; version=1"),
+        )
+        if current.status_code == 200:
+            allof = current.json().get("allOf", [])
+            if any(isinstance(r, dict) and r.get("$ref") == fg_id for r in allof):
+                log.info("Field group already attached to %s", schema_id)
+                return data
+
+        resp = await client.patch(
+            f"{base}/tenant/schemas/{encoded}",
+            headers=_sr_headers(auth, content_type=True),
+            json=[{"op": "add", "path": "/allOf/-", "value": {"$ref": fg_id}}],
+        )
+
+    if resp.status_code not in (200, 201):
+        raise ValueError(f"Attach field group failed ({resp.status_code}): {resp.text[:300]}")
+    log.info("Attached field group %s to schema %s", fg_id, schema_id)
+    return data
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 9: ensure the identity namespace exists (Identity Service, region host)
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def ensure_namespace(ctx: dict, data: dict) -> dict:
+    input_json = await _get_input_json(ctx, data)
+    decision = data.get("identityDecision") or {}
+    is_primary = decision.get("isPrimary")
+    namespace = input_json.get("identityNamespace")
+
+    # No business key at all → nothing to register
+    if is_primary is None or not namespace:
+        data["namespaceSkipped"] = True
+        log.info("No identity for %s — skipping namespace", ctx["schema_name"])
+        return data
+
+    auth = await _aep_auth(ctx["org_id"])
+    url = f"{settings.identity_host}/data/core/idnamespace/identities"
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        listing = await client.get(url, headers=_sr_headers(auth))
+        if listing.status_code == 200:
+            for ns in (listing.json() or []):
+                if ns.get("code") == namespace:
+                    data["namespaceCode"] = namespace
+                    log.info("Namespace %r already exists — reusing", namespace)
+                    return data
+
+        resp = await client.post(
+            url,
+            headers=_sr_headers(auth, content_type=True),
+            json={
+                "name": namespace,
+                "code": namespace,
+                "description": f"Identity namespace migrated from Adobe Campaign for {ctx['schema_name']}.",
+                "idType": "CROSS_DEVICE",
+            },
+        )
+
+    if resp.status_code not in (200, 201):
+        # Namespace already exists (race, prior run, or standard namespace) → reuse it
+        if resp.status_code == 409 or "already exist" in resp.text.lower():
+            data["namespaceCode"] = namespace
+            log.info("Namespace %r already exists (409) — reusing", namespace)
+            return data
+        raise ValueError(f"Create namespace failed ({resp.status_code}): {resp.text[:300]}")
+    data["namespaceCode"] = namespace
+    log.info("Created identity namespace %r", namespace)
+    return data
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 10: create the identity descriptor on the primary-key field
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def call_identity_descriptor(ctx: dict, data: dict) -> dict:
+    if data.get("namespaceSkipped"):
+        log.info("No identity for %s — skipping descriptor", ctx["schema_name"])
+        return data
+
+    input_json = await _get_input_json(ctx, data)
+    tenant_id = data.get("tenantId")
+    schema_id = data.get("schemaId")
+    decision = data.get("identityDecision") or {}
+    is_primary = bool(decision.get("isPrimary"))
+    namespace = data.get("namespaceCode") or input_json.get("identityNamespace")
+    primary_key = input_json.get("primaryKey")
+
+    if not (tenant_id and schema_id and namespace and primary_key):
+        raise ValueError("Missing data for identity descriptor (tenantId/schemaId/namespace/primaryKey)")
+
+    payload = {
+        "@type": "xdm:descriptorIdentity",
+        "xdm:sourceSchema": schema_id,
+        "xdm:sourceVersion": 1,
+        "xdm:sourceProperty": _source_property_path(tenant_id, primary_key),
+        "xdm:namespace": namespace,
+        "xdm:property": "xdm:code",
+        "xdm:isPrimary": is_primary,
+    }
+
+    auth = await _aep_auth(ctx["org_id"])
+    base = _schema_registry_base()
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            f"{base}/tenant/descriptors",
+            headers=_sr_headers(auth, content_type=True),
+            json=payload,
+        )
+
+    if resp.status_code not in (200, 201):
+        if resp.status_code == 409 or "already" in resp.text.lower():
+            log.info("Identity descriptor already exists for %s", schema_id)
+            data["descriptorIsPrimary"] = is_primary
+            return data
+        raise ValueError(f"Create identity descriptor failed ({resp.status_code}): {resp.text[:300]}")
+    data["descriptorIsPrimary"] = is_primary
+    log.info("Created identity descriptor for %s (isPrimary=%s)", schema_id, is_primary)
+    return data
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 11: enable the schema for Profile (union) — only when identity is primary
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def enable_profile_union(ctx: dict, data: dict) -> dict:
+    decision = data.get("identityDecision") or {}
+    if not decision.get("isPrimary"):
+        log.info("Identity not primary for %s — skipping Profile/union enable", ctx["schema_name"])
+        return data
+
+    schema_id = data.get("schemaId")
+    if not schema_id:
+        raise ValueError("schemaId missing for union enable")
+
+    auth = await _aep_auth(ctx["org_id"])
+    base = _schema_registry_base()
+    encoded = quote(schema_id, safe="")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        current = await client.get(
+            f"{base}/tenant/schemas/{encoded}",
+            headers=_sr_headers(auth, accept="application/vnd.adobe.xed+json; version=1"),
+        )
+        if current.status_code == 200 and "union" in (current.json().get("meta:immutableTags") or []):
+            log.info("Schema %s already union-enabled", schema_id)
+            return data
+
+        resp = await client.patch(
+            f"{base}/tenant/schemas/{encoded}",
+            headers=_sr_headers(auth, content_type=True),
+            json=[{"op": "add", "path": "/meta:immutableTags", "value": ["union"]}],
+        )
+
+    if resp.status_code not in (200, 201):
+        raise ValueError(f"Enable Profile union failed ({resp.status_code}): {resp.text[:300]}")
+    log.info("Enabled Profile (union) for %s", schema_id)
+    return data
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 12: verify the schema exists in the registry
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def verify(ctx: dict, data: dict) -> dict:
+    schema_id = data.get("schemaId")
+    if not schema_id:
+        raise ValueError("schemaId missing for verify")
+
+    auth = await _aep_auth(ctx["org_id"])
+    base = _schema_registry_base()
+    encoded = quote(schema_id, safe="")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(
+            f"{base}/tenant/schemas/{encoded}",
+            headers=_sr_headers(auth, accept="application/vnd.adobe.xed-id+json"),
+        )
+
+    if resp.status_code != 200:
+        raise ValueError(f"Verify failed — schema not found ({resp.status_code}): {resp.text[:200]}")
+    data["verified"] = True
+    log.info("Verified schema %s exists in AEP", schema_id)
     return data

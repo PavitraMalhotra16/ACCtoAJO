@@ -1,7 +1,37 @@
 import asyncio
+import contextlib
 import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+
+# Steps 4 + 6–12 talk to AEP. The runner tests only exercise orchestration /
+# resume logic, so stub these to pass-throughs (their behaviour is covered in
+# test_handlers.py). FETCH_TENANT_ID injects a tenant id the later steps expect.
+_PUSH_HANDLERS = [
+    "call_schema_api",
+    "call_fieldgroup_api",
+    "attach_fieldgroup",
+    "ensure_namespace",
+    "call_identity_descriptor",
+    "enable_profile_union",
+    "verify",
+]
+
+
+@contextlib.contextmanager
+def _patch_push_handlers():
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch(
+            "pipeline.handlers.fetch_tenant_id",
+            new=AsyncMock(side_effect=lambda ctx, data: {**data, "tenantId": "_test"}),
+        ))
+        for name in _PUSH_HANDLERS:
+            stack.enter_context(patch(
+                f"pipeline.handlers.{name}",
+                new=AsyncMock(side_effect=lambda ctx, data: data),
+            ))
+        yield
 
 
 @pytest.mark.asyncio
@@ -41,9 +71,7 @@ async def test_run_schema_success():
         from pipeline.runner import run_schema
         job_sem = asyncio.Semaphore(3)
 
-        with patch("pipeline.handlers.fetch_tenant_id", new=AsyncMock(
-            side_effect=lambda ctx, data: {**data, "tenantId": "_test"}
-        )):
+        with _patch_push_handlers():
             await run_schema(
                 item_id="item-1",
                 login_id="user1",
@@ -137,9 +165,7 @@ async def test_run_schema_resumes_from_snapshot():
         from pipeline.runner import run_schema
         job_sem = asyncio.Semaphore(3)
 
-        with patch("pipeline.handlers.fetch_tenant_id", new=AsyncMock(
-            side_effect=lambda ctx, data: {**data, "tenantId": "_test"}
-        )):
+        with _patch_push_handlers():
             await run_schema(
                 item_id="item-3",
                 login_id="user1",

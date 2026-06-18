@@ -3,12 +3,12 @@ from pipeline_steps import PIPELINE_STEPS, PipelineStep
 
 
 def test_step_count():
-    assert len(PIPELINE_STEPS) == 8
+    assert len(PIPELINE_STEPS) == 12
 
 
 def test_steps_ordered():
     orders = [s.order for s in PIPELINE_STEPS]
-    assert orders == list(range(1, 9))
+    assert orders == list(range(1, 13))
 
 
 def test_step_names():
@@ -18,9 +18,13 @@ def test_step_names():
         "MAP_TYPES",
         "RESOLVE_IDENTITY",
         "FETCH_TENANT_ID",
-        "BUILD_PAYLOAD",
+        "MAKE_ENRICHED_JSON",
         "CALL_SCHEMA_API",
+        "CALL_FIELDGROUP_API",
+        "ATTACH_FIELDGROUP",
+        "ENSURE_NAMESPACE",
         "CALL_IDENTITY_DESCRIPTOR_API",
+        "ENABLE_PROFILE_UNION",
         "VERIFY",
     ]
 

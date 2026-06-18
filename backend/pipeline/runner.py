@@ -99,6 +99,11 @@ async def run_schema(
                             identity_is_primary=identity.get("isPrimary"),
                         )
 
+                    # Persist the enriched input JSON the moment it's built, so the
+                    # converted_schemas.enriched_json column reflects the AEP push input.
+                    if step.name == "MAKE_ENRICHED_JSON":
+                        await _write_enriched_json(converted_schema_id, data.get("ajoPayload", data))
+
                 except Exception as exc:
                     log.error("Schema %s failed at %s: %s", schema_name, step.name, exc)
                     await _update_item(
@@ -106,8 +111,6 @@ async def run_schema(
                     )
                     return
 
-            ajo_payload = data.get("ajoPayload", data)
-            await _write_enriched_json(converted_schema_id, ajo_payload)
             await _update_item(item_id, "COMPLETED", "COMPLETED", len(PIPELINE_STEPS))
             log.info("Schema %s migrated successfully", schema_name)
 
