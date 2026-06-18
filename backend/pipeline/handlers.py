@@ -797,6 +797,32 @@ async def enable_profile_union(ctx: dict, data: dict) -> dict:
             f"{base}/tenant/schemas/{encoded}",
             headers=_sr_headers(auth, accept="application/vnd.adobe.xed+json; version=1"),
         )
+        if current.status_code == 404:
+            # Schema was deleted or ID is stale — re-resolve by title
+            schema_title = data.get("schemaTitle")
+            if not schema_title:
+                raise ValueError(f"Schema {schema_id} not found in AEP and schemaTitle missing — cannot re-resolve")
+            listing = await client.get(
+                f"{base}/tenant/schemas",
+                headers=_sr_headers(auth, accept="application/vnd.adobe.xed-id+json"),
+            )
+            new_id = None
+            if listing.status_code == 200:
+                for item in _listing_results(listing.json()):
+                    if item.get("title") == schema_title:
+                        new_id = item["$id"]
+                        break
+            if not new_id:
+                raise ValueError(f"Schema {schema_id} not found in AEP — it may have been deleted. Clear this job and restart migration.")
+            log.info("Re-resolved stale schemaId for %r: %s → %s", schema_title, schema_id, new_id)
+            schema_id = new_id
+            data["schemaId"] = new_id
+            encoded = quote(schema_id, safe="")
+            current = await client.get(
+                f"{base}/tenant/schemas/{encoded}",
+                headers=_sr_headers(auth, accept="application/vnd.adobe.xed+json; version=1"),
+            )
+
         if current.status_code == 200 and "union" in (current.json().get("meta:immutableTags") or []):
             log.info("Schema %s already union-enabled", schema_id)
             return data
@@ -831,6 +857,24 @@ async def verify(ctx: dict, data: dict) -> dict:
             f"{base}/tenant/schemas/{encoded}",
             headers=_sr_headers(auth, accept="application/vnd.adobe.xed-id+json"),
         )
+        if resp.status_code == 404:
+            schema_title = data.get("schemaTitle")
+            if schema_title:
+                listing = await client.get(
+                    f"{base}/tenant/schemas",
+                    headers=_sr_headers(auth, accept="application/vnd.adobe.xed-id+json"),
+                )
+                if listing.status_code == 200:
+                    for item in _listing_results(listing.json()):
+                        if item.get("title") == schema_title:
+                            schema_id = item["$id"]
+                            data["schemaId"] = schema_id
+                            encoded = quote(schema_id, safe="")
+                            resp = await client.get(
+                                f"{base}/tenant/schemas/{encoded}",
+                                headers=_sr_headers(auth, accept="application/vnd.adobe.xed-id+json"),
+                            )
+                            break
 
     if resp.status_code != 200:
         raise ValueError(f"Verify failed — schema not found ({resp.status_code}): {resp.text[:200]}")
