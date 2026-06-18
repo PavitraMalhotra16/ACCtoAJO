@@ -28,6 +28,7 @@ async def _update_item(
     error: str | None = None,
     identity_is_primary: bool | None = None,
     final_file_path: str | None = None,
+    tmp_file_path: str | None = None,
 ) -> None:
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -44,6 +45,8 @@ async def _update_item(
             item.identity_is_primary = identity_is_primary
         if final_file_path is not None:
             item.final_file_path = final_file_path
+        if tmp_file_path is not None:
+            item.tmp_file_path = tmp_file_path
         if status == "COMPLETED":
             item.completed_at = datetime.now(timezone.utc)
         await db.commit()
@@ -72,7 +75,8 @@ async def run_schema(
                 try:
                     handler = await _load_handler(step.handler)
                     data = await handler(ctx, data)
-                    write_tmp(login_id, schema_name, data)
+                    tmp = write_tmp(login_id, schema_name, data)
+                    await _update_item(item_id, "RUNNING", step.name, step.order, tmp_file_path=str(tmp))
 
                     if step.name == "RESOLVE_IDENTITY":
                         identity = data.get("identityDecision", {})

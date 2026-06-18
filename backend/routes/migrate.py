@@ -85,7 +85,16 @@ async def migrate_start(
 
 
 @router.get("/status/{job_id}")
-async def migrate_status(job_id: str, db: AsyncSession = Depends(get_db)):
+async def migrate_status(
+    job_id: str,
+    acc_session: Optional[str] = Cookie(default=None),
+    acc_user: Optional[str] = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    login_id = await get_login_from_cookie(acc_session, db, acc_user)
+    if not login_id:
+        raise HTTPException(401, "Not authenticated")
+
     result = await db.execute(
         select(SchemaJobItem)
         .where(SchemaJobItem.job_id == job_id)
@@ -139,7 +148,16 @@ async def list_jobs(
 
 
 @router.get("/schema/{item_id}")
-async def schema_item_detail(item_id: str, db: AsyncSession = Depends(get_db)):
+async def schema_item_detail(
+    item_id: str,
+    acc_session: Optional[str] = Cookie(default=None),
+    acc_user: Optional[str] = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    login_id = await get_login_from_cookie(acc_session, db, acc_user)
+    if not login_id:
+        raise HTTPException(401, "Not authenticated")
+
     result = await db.execute(
         select(SchemaJobItem).where(SchemaJobItem.id == item_id)
     )

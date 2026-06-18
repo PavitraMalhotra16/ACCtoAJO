@@ -28,7 +28,7 @@ async def test_run_schema_success(tmp_path, schema_file, monkeypatch):
     completed_statuses = []
 
     async def fake_update(item_id, status, step_name, step_order, error=None,
-                          identity_is_primary=None, final_file_path=None):
+                          identity_is_primary=None, final_file_path=None, tmp_file_path=None):
         completed_statuses.append((status, step_name))
 
     with patch("pipeline.runner._update_item", side_effect=fake_update), \
@@ -71,7 +71,7 @@ async def test_run_schema_failure_at_step(tmp_path, schema_file, monkeypatch):
     statuses = []
 
     async def fake_update(item_id, status, step_name, step_order, error=None,
-                          identity_is_primary=None, final_file_path=None):
+                          identity_is_primary=None, final_file_path=None, tmp_file_path=None):
         statuses.append((status, step_name, error))
 
     async def bad_map_types(ctx, data):

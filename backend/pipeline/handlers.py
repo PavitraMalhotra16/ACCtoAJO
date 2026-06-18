@@ -115,7 +115,9 @@ async def fetch_tenant_id(ctx: dict, data: dict) -> dict:
             raise ValueError(f"No AJO credentials found for org {org_id}")
 
         access_token = decrypt(dest.encrypted_access_token)
-        client_id = decrypt(dest.encrypted_credentials).split(":")[0]
+        client_id = dest.client_id or ""
+        if not client_id:
+            raise ValueError(f"No client_id found for org {org_id}")
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
