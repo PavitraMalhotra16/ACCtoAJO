@@ -541,7 +541,19 @@ async def call_fieldgroup_api(ctx: dict, data: dict) -> dict:
     title = f"{input_json.get('title') or ctx['schema_name']} Fields"
     fields = input_json.get("fields", [])
     tenant_key = _tenant_key(tenant_id)
-    properties = {f["name"]: _xdm_field(f) for f in fields if f.get("name")}
+    primary_key = input_json.get("primaryKey")
+
+    # AEP requires identity descriptor fields to be type string.
+    # Force the primary key field to string so the descriptor call succeeds.
+    def _xdm_field_for(f: dict) -> dict:
+        built = _xdm_field(f)
+        if f.get("name") == primary_key and built.get("type") != "string":
+            built["type"] = "string"
+            built.pop("format", None)
+            log.info("Coerced primary key field %r to string for AEP identity descriptor", f["name"])
+        return built
+
+    properties = {f["name"]: _xdm_field_for(f) for f in fields if f.get("name")}
 
     payload = {
         "type": "object",
