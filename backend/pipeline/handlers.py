@@ -581,8 +581,27 @@ async def call_fieldgroup_api(ctx: dict, data: dict) -> dict:
         if existing.status_code == 200:
             for item in _listing_results(existing.json()):
                 if item.get("title") == title:
-                    data["fieldGroupId"] = item["$id"]
-                    log.info("Field group %r already exists — reusing %s", title, item["$id"])
+                    fg_id = item["$id"]
+                    # If primary key was coerced to string, patch the existing
+                    # field group so AEP's identity descriptor validation passes.
+                    if primary_key and properties.get(primary_key, {}).get("type") == "string":
+                        encoded_fg = quote(fg_id, safe="")
+                        patch_resp = await client.patch(
+                            f"{base}/tenant/fieldgroups/{encoded_fg}",
+                            headers=_sr_headers(auth, content_type=True),
+                            json=[{
+                                "op": "replace",
+                                "path": f"/definitions/campaignFields/properties/{tenant_key}/properties/{primary_key}/type",
+                                "value": "string",
+                            }],
+                        )
+                        if patch_resp.status_code in (200, 201):
+                            log.info("Patched field group %s: set %r to string", fg_id, primary_key)
+                        else:
+                            log.warning("Patch field group failed (%s) — proceeding anyway: %s",
+                                        patch_resp.status_code, patch_resp.text[:200])
+                    data["fieldGroupId"] = fg_id
+                    log.info("Field group %r already exists — reusing %s", title, fg_id)
                     return data
 
         resp = await client.post(
