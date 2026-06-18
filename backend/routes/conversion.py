@@ -86,6 +86,7 @@ async def _run_conversion_job(job_id: str, schemas: list[SchemaRef], acc_conn, l
                         job_id=job_id,
                         login_id=login_id,
                         schema_name=key,
+                        namespace=s.namespace,
                         raw_json=json.dumps(parsed),
                     ))
                     await db_session.commit()
