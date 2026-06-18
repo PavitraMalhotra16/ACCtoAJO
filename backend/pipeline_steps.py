@@ -12,7 +12,7 @@ class PipelineStep:
 PIPELINE_STEPS: list[PipelineStep] = [
     PipelineStep(
         name="LOAD_JSON",
-        label="Load extracted schema from disk",
+        label="Load extracted schema from DB",
         handler="pipeline.handlers.load_json",
         order=1,
     ),

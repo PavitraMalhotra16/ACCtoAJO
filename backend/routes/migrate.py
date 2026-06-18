@@ -128,6 +128,7 @@ async def migrate_status(
         "running": sum(1 for i in items if i.status == "RUNNING"),
         "queued": sum(1 for i in items if i.status == "QUEUED"),
         "failed": sum(1 for i in items if i.status == "FAILED"),
+        "started_at": items[0].created_at.isoformat() if items else None,
         "schemas": [
             {
                 "id": i.id,
@@ -137,6 +138,7 @@ async def migrate_status(
                 "current_step_order": i.current_step_order,
                 "identity_is_primary": i.identity_is_primary,
                 "error_message": i.error_message,
+                "created_at": i.created_at.isoformat(),
                 "completed_at": i.completed_at.isoformat() if i.completed_at else None,
             }
             for i in items

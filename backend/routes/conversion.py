@@ -5,6 +5,7 @@ GET  /api/convert/status/{job_id} — poll progress
 """
 
 import asyncio
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -19,7 +20,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from services.acc_soap import build_schema_inventory_envelope, build_srcschema_get_envelope, parse_fault, parse_schema_inventory
 from db import AsyncSessionLocal, ConvertedSchema, SourceConnection, get_db
 from services.schema_inspector import parse_schema_to_xdm
-from storage import save_schema
 from core.security import get_login_from_cookie
 
 log = logging.getLogger("acc_backend.conversion")
@@ -28,7 +28,7 @@ router = APIRouter(prefix="/api/convert")
 SOAP_TIMEOUT = 30.0
 _jobs: dict[str, dict] = {}
 
-EXCLUDED_NAMESPACES = {"crm", "ncm", "nms", "xtk"}
+EXCLUDED_NAMESPACES = {"crm", "ncm", "nms", "xtk", "nl"}
 
 
 class SchemaRef(BaseModel):
@@ -81,15 +81,13 @@ async def _run_conversion_job(job_id: str, schemas: list[SchemaRef], acc_conn, l
                 if not parsed:
                     raise ValueError("Could not parse schema XML")
 
-                # Save JSON to disk, store path in DB
-                file_path = save_schema(login_id, job_id, key, parsed)
                 async with AsyncSessionLocal() as db_session:
                     db_session.add(ConvertedSchema(
                         job_id=job_id,
                         login_id=login_id,
                         schema_name=key,
                         namespace=s.namespace,
-                        storage_path=file_path,
+                        raw_json=json.dumps(parsed),
                     ))
                     await db_session.commit()
 

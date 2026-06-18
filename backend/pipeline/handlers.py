@@ -4,9 +4,63 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from db import AsyncSessionLocal, ConvertedSchema, DestinationConnection, TenantConfig
-from core.security import decrypt
+from core.security import decrypt, encrypt
+
+IMS_TOKEN_URL = "https://ims-na1.adobelogin.com/ims/token/v3"
+IMS_SCOPES = "AdobeID,openid,read_organizations,adobeio_api,additional_details.projectedProductContext"
+
+
+async def get_valid_access_token(dest: DestinationConnection, db) -> str:
+    """Return a valid access token, refreshing via OAuth S2S if expired or close to expiry."""
+    now = datetime.now(timezone.utc)
+    buffer = timedelta(minutes=5)
+
+    if dest.token_expires_at and dest.token_expires_at > now + buffer:
+        return decrypt(dest.encrypted_access_token)
+
+    # Token expired or missing — refresh using stored client_id:client_secret
+    if not dest.encrypted_credentials:
+        raise ValueError("No OAuth credentials stored — reconnect AJO")
+
+    raw = decrypt(dest.encrypted_credentials)
+    parts = raw.split(":", 1)
+    if len(parts) != 2:
+        raise ValueError("Stored credentials malformed — reconnect AJO")
+    client_id, client_secret = parts
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            IMS_TOKEN_URL,
+            data={
+                "grant_type": "client_credentials",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "scope": IMS_SCOPES,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+
+    if resp.status_code != 200:
+        raise ValueError(f"Token refresh failed ({resp.status_code}): {resp.text[:200]}")
+
+    payload = resp.json()
+    new_token = payload.get("access_token")
+    if not new_token:
+        raise ValueError("IMS did not return access_token during refresh")
+
+    expires_in = int(payload.get("expires_in", 3600))
+    if expires_in > 86_400:
+        expires_in //= 1000
+
+    dest.encrypted_access_token = encrypt(new_token)
+    dest.token_expires_at = now + timedelta(seconds=expires_in)
+    await db.commit()
+
+    log.info("Access token refreshed for org %s (expires in %ds)", dest.org_id, expires_in)
+    return new_token
 
 log = logging.getLogger("acc_backend.pipeline.handlers")
 
@@ -180,20 +234,19 @@ async def fetch_tenant_id(ctx: dict, data: dict) -> dict:
         if not dest or not dest.encrypted_access_token:
             raise ValueError(f"No AJO credentials found for org {org_id}")
 
-        access_token = decrypt(dest.encrypted_access_token)
+        access_token = await get_valid_access_token(dest, db)
         client_id = dest.client_id or ""
         if not client_id:
             raise ValueError(f"No client_id found for org {org_id}")
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
-                "https://platform.adobe.io/data/foundation/schemaregistry/tenant",
+                "https://platform.adobe.io/data/foundation/schemaregistry/stats",
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "x-api-key": client_id,
                     "x-gw-ims-org-id": org_id,
-                    "x-sandbox-name": dest.sandbox_name or "prod",
-                    "Accept": "application/vnd.adobe.xed-id+json",
+                    "x-sandbox-name": (dest.sandbox_name or "prod").strip(),
                 },
             )
 
@@ -201,20 +254,22 @@ async def fetch_tenant_id(ctx: dict, data: dict) -> dict:
             raise ValueError(f"AEP tenant API returned {resp.status_code}: {resp.text[:300]}")
 
         payload = resp.json()
-        tenant_id = payload.get("tenantId") or payload.get("imsOrg", "").split("@")[0]
+        tenant_id = payload.get("tenantId")
         if not tenant_id:
-            raise ValueError("Could not extract tenantId from AEP response")
+            raise ValueError(f"tenantId not found in AEP stats response: {str(payload)[:200]}")
 
-        if cached:
-            cached.tenant_id = tenant_id
-            cached.fetched_at = datetime.now(timezone.utc)
-        else:
-            db.add(TenantConfig(
-                org_id=org_id,
-                tenant_id=tenant_id,
-                sandbox_id=dest.sandbox_name,
-                sandbox_type="production",
-            ))
+        # Upsert — safe against concurrent schemas racing to insert the same org_id
+        stmt = pg_insert(TenantConfig).values(
+            org_id=org_id,
+            tenant_id=tenant_id,
+            sandbox_id=(dest.sandbox_name or "").strip(),
+            sandbox_type="production",
+            fetched_at=datetime.now(timezone.utc),
+        ).on_conflict_do_update(
+            index_elements=["org_id"],
+            set_={"tenant_id": tenant_id, "fetched_at": datetime.now(timezone.utc)},
+        )
+        await db.execute(stmt)
         await db.commit()
 
     data["tenantId"] = tenant_id

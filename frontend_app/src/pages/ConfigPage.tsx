@@ -4,7 +4,7 @@ import AccPanel from '../components/AccPanel'
 import AjoPanel from '../components/AjoPanel'
 import { useConfigStore } from '../store/configStore'
 import { getAccStatus, getAjoStatus } from '../api/client'
-import { startMigration } from '../api/migration'
+import { startExtraction } from '../api/migration'
 
 export default function ConfigPage() {
   const navigate = useNavigate()
@@ -27,12 +27,13 @@ export default function ConfigPage() {
     setMigrating(true)
     setMigrateError(null)
     try {
-      const data = await startMigration()
+      const data = await startExtraction()
       if (data.message === 'all_done') {
-        setMigrateError(`All ${data.total} schemas are already migrated.`)
+        // Already extracted — skip straight to AJO migration
+        navigate('/migration/run?phase=migrate')
         return
       }
-      navigate(`/migration/run?job=${data.job_id}`)
+      navigate(`/migration/run?extract_job=${data.job_id}`)
     } catch (e: unknown) {
       setMigrateError(e instanceof Error ? e.message : 'Failed to start migration')
     } finally {
