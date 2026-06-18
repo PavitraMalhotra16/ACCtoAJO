@@ -60,3 +60,9 @@ export async function getMigrationStatus(jobId: string): Promise<MigrationJob> {
   if (!res.ok) throw new Error('Job not found')
   return res.json()
 }
+
+export async function listMigrationJobs(): Promise<{ jobs: { job_id: string; created_at: string }[] }> {
+  const res = await fetch('/api/migrate/jobs', { credentials: 'include' })
+  if (!res.ok) return { jobs: [] }
+  return res.json()
+}

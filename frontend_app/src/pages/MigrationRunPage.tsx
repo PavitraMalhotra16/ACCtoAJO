@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   getExtractionStatus,
   getMigrationStatus,
+  listMigrationJobs,
   startMigration,
   type ExtractionJob,
   type MigrationJob,
@@ -287,15 +288,30 @@ export default function MigrationRunPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const extractJobId = searchParams.get('extract_job')
+  const resumeJobId = searchParams.get('migrate_job')   // direct resume — skip extraction
   const skipToMigrate = searchParams.get('phase') === 'migrate'
 
-  const [phase, setPhase] = useState<Phase>('extracting')
+  const initialPhase: Phase = (resumeJobId || skipToMigrate) ? 'migrating' : 'extracting'
+  const [phase, setPhase] = useState<Phase>(initialPhase)
   const [extractJob, setExtractJob] = useState<ExtractionJob | null>(null)
   const [migrateJob, setMigrateJob] = useState<MigrationJob | null>(null)
   const [startedAt, setStartedAt] = useState<string | null>(null)
-  const [migrateJobId, setMigrateJobId] = useState<string | null>(null)
+  const [migrateJobId, setMigrateJobId] = useState<string | null>(resumeJobId)
   const [error, setError] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Load the most recent completed job's stats (used when all_done)
+  async function loadLastJobStats() {
+    try {
+      const { jobs } = await listMigrationJobs()
+      if (jobs.length) {
+        const data = await getMigrationStatus(jobs[0].job_id)
+        setMigrateJob(data)
+        if ((data as any).started_at) setStartedAt((data as any).started_at)
+      }
+    } catch { /* ignore */ }
+    setPhase('done')
+  }
 
   // Phase 1: poll extraction → auto-start migration when done
   useEffect(() => {
@@ -310,7 +326,7 @@ export default function MigrationRunPage() {
           try {
             const migData = await startMigration()
             if (migData.message === 'all_done') {
-              setPhase('done')
+              await loadLastJobStats()
             } else {
               setMigrateJobId(migData.job_id)
               setPhase('migrating')
@@ -354,33 +370,35 @@ export default function MigrationRunPage() {
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [phase, migrateJobId])
 
-  // Skip-to-migrate path (schemas already extracted)
+  // Skip-to-migrate path (schemas already extracted, no known job ID yet)
   useEffect(() => {
-    if (!skipToMigrate) return
+    if (!skipToMigrate || resumeJobId) return
     startMigration()
       .then(data => {
         if (data.message === 'all_done') {
-          setPhase('done')
+          loadLastJobStats()
         } else {
           setMigrateJobId(data.job_id)
           setPhase('migrating')
         }
       })
       .catch(e => setError(e instanceof Error ? e.message : 'Failed to start migration'))
-  }, [skipToMigrate])
+  }, [skipToMigrate, resumeJobId])
 
   const allDone = phase === 'done'
+
+  const phaseLabels = ['extracting', 'migrating', 'done']
 
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Top nav bar */}
       <div className="bg-white border-b border-gray-200 px-6 py-3 flex items-center gap-3">
         {allDone && (
-          <button onClick={() => navigate('/')} className="text-sm text-gray-400 hover:text-gray-700">← Back</button>
+          <button onClick={() => navigate('/')} className="text-sm text-gray-400 hover:text-gray-700">← Back to home</button>
         )}
         <div className="flex gap-2 items-center ml-auto">
-          {['extracting', 'migrating', 'done'].map((p, i) => {
-            const phaseIdx = ['extracting', 'migrating', 'done'].indexOf(phase)
+          {phaseLabels.map((p, i) => {
+            const phaseIdx = phaseLabels.indexOf(phase)
             const done = i < phaseIdx || phase === 'done'
             const active = p === phase && phase !== 'done'
             return (
@@ -392,7 +410,7 @@ export default function MigrationRunPage() {
                   {active && <svg className="animate-spin w-3 h-3" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>}
                   {p === 'extracting' ? 'Extract' : p === 'migrating' ? 'Migrate' : 'Done'}
                 </div>
-                {i < 2 && <div className={`w-6 h-px ${i < phaseIdx ? 'bg-green-300' : 'bg-gray-200'}`} />}
+                {i < 2 && <div className={`w-6 h-px ${i < phaseLabels.indexOf(phase) ? 'bg-green-300' : 'bg-gray-200'}`} />}
               </div>
             )
           })}
@@ -404,9 +422,33 @@ export default function MigrationRunPage() {
           <div className="mb-4 bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-red-700 text-sm">{error}</div>
         )}
 
-        {(phase === 'extracting') && <ExtractionLoadingView job={extractJob} />}
+        {/* Final stats banner — shown when all done */}
+        {allDone && migrateJob && (
+          <div className={`mb-6 rounded-xl px-5 py-4 flex items-center justify-between ${
+            migrateJob.failed === 0
+              ? 'bg-green-50 border border-green-200'
+              : 'bg-yellow-50 border border-yellow-200'
+          }`}>
+            <div>
+              <p className={`font-semibold text-base ${migrateJob.failed === 0 ? 'text-green-700' : 'text-yellow-700'}`}>
+                {migrateJob.failed === 0
+                  ? `Migration complete — all ${migrateJob.completed} schemas migrated successfully`
+                  : `Migration finished — ${migrateJob.completed} succeeded, ${migrateJob.failed} failed`}
+              </p>
+              <p className="text-xs text-gray-400 mt-0.5">Final results shown below</p>
+            </div>
+            <button
+              onClick={() => navigate('/')}
+              className="shrink-0 ml-4 px-4 py-2 rounded-lg bg-white border border-gray-200 text-sm text-gray-600 hover:bg-gray-50 transition-colors"
+            >
+              Back to home
+            </button>
+          </div>
+        )}
 
-        {(phase === 'migrating' || phase === 'done') && migrateJob && (
+        {phase === 'extracting' && <ExtractionLoadingView job={extractJob} />}
+
+        {(phase === 'migrating' || allDone) && migrateJob && (
           <MigrationDashboard job={migrateJob} startedAt={startedAt} />
         )}
 
@@ -419,7 +461,7 @@ export default function MigrationRunPage() {
           </div>
         )}
 
-        {phase === 'done' && !migrateJob && (
+        {allDone && !migrateJob && (
           <div className="bg-green-50 border border-green-200 rounded-xl p-6 text-center">
             <p className="text-green-700 font-semibold">All schemas already up to date</p>
             <button onClick={() => navigate('/')} className="mt-3 text-sm text-green-600 underline">Back to home</button>

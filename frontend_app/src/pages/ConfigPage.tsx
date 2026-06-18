@@ -4,7 +4,7 @@ import AccPanel from '../components/AccPanel'
 import AjoPanel from '../components/AjoPanel'
 import { useConfigStore } from '../store/configStore'
 import { getAccStatus, getAjoStatus } from '../api/client'
-import { startExtraction } from '../api/migration'
+import { listMigrationJobs, getMigrationStatus, startExtraction } from '../api/migration'
 
 export default function ConfigPage() {
   const navigate = useNavigate()
@@ -21,6 +21,16 @@ export default function ConfigPage() {
     getAjoStatus().then(s => {
       if (s.connected && s.org_id && s.sandbox_name) setAjoConnected(s.org_id, s.sandbox_name)
     })
+
+    // Resume active migration job if one is in progress
+    listMigrationJobs().then(async ({ jobs }) => {
+      if (!jobs.length) return
+      const latest = jobs[0]
+      const status = await getMigrationStatus(latest.job_id)
+      if (status.running > 0 || status.queued > 0) {
+        navigate(`/migration/run?migrate_job=${latest.job_id}`)
+      }
+    }).catch(() => {/* not authenticated yet, ignore */})
   }, [])
 
   async function handleMigrate() {

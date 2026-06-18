@@ -160,10 +160,12 @@ async def list_jobs(
         select(SchemaJobItem.job_id, SchemaJobItem.created_at)
         .where(SchemaJobItem.login_id == login_id)
         .distinct(SchemaJobItem.job_id)
-        .order_by(SchemaJobItem.created_at.desc())
+        .order_by(SchemaJobItem.job_id, SchemaJobItem.created_at.desc())
     )
     rows = result.fetchall()
-    return {"jobs": [{"job_id": r[0], "created_at": r[1].isoformat()} for r in rows]}
+    # Sort by created_at desc after deduplication
+    sorted_rows = sorted(rows, key=lambda r: r[1], reverse=True)
+    return {"jobs": [{"job_id": r[0], "created_at": r[1].isoformat()} for r in sorted_rows]}
 
 
 @router.get("/schema/{item_id}")
