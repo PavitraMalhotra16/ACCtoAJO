@@ -68,16 +68,18 @@ async def migrate_start(
     job_id = str(uuid.uuid4())
     items: list[dict] = []
     for s in to_migrate:
+        prev_failed = last_failed.get(s.schema_name)
         item = SchemaJobItem(
             job_id=job_id,
             login_id=login_id,
             schema_name=s.schema_name,
             status="QUEUED",
+            # Carry over resolved identity from previous failed run so it
+            # stays visible even when RESOLVE_IDENTITY is skipped on resume.
+            identity_is_primary=prev_failed.identity_is_primary if prev_failed else None,
         )
         db.add(item)
         await db.flush()
-
-        prev_failed = last_failed.get(s.schema_name)
         resume_from_step = prev_failed.current_step_order if prev_failed and prev_failed.current_snapshot else 0
         resume_data = json.loads(prev_failed.current_snapshot) if prev_failed and prev_failed.current_snapshot else None
 
