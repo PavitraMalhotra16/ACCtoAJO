@@ -58,7 +58,8 @@ class ConvertedSchema(Base):
     login_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     schema_name: Mapped[str] = mapped_column(String(255), nullable=False)
     namespace: Mapped[str] = mapped_column(String(100), nullable=False)
-    storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    raw_json: Mapped[str] = mapped_column(Text, nullable=False)
+    enriched_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -82,8 +83,7 @@ class SchemaJobItem(Base):
     current_step: Mapped[str | None] = mapped_column(String(100), nullable=True)
     current_step_order: Mapped[int] = mapped_column(Integer, default=0)
     identity_is_primary: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    tmp_file_path: Mapped[str | None] = mapped_column(Text, nullable=True)
-    final_file_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    current_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
