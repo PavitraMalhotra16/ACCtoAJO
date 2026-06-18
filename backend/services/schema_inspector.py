@@ -49,7 +49,6 @@ def parse_schema_to_xdm(xml_text: str, namespace: str, name: str) -> dict:
     source = {
         "schemaType":     f"xtk:{schema_type}",
         "fullName":       full_name,
-        "namespace":      namespace,
         "name":           name,
         "rawXmlCaptured": True,
     }
