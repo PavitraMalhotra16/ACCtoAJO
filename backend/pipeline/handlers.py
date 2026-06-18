@@ -597,12 +597,27 @@ async def call_fieldgroup_api(ctx: dict, data: dict) -> dict:
                         )
                         if patch_resp.status_code in (200, 201):
                             log.info("Patched field group %s: set %r to string", fg_id, primary_key)
+                            data["fieldGroupId"] = fg_id
+                            log.info("Field group %r already exists — reusing %s", title, fg_id)
+                            return data
                         else:
-                            log.warning("Patch field group failed (%s) — proceeding anyway: %s",
-                                        patch_resp.status_code, patch_resp.text[:200])
-                    data["fieldGroupId"] = fg_id
-                    log.info("Field group %r already exists — reusing %s", title, fg_id)
-                    return data
+                            log.warning(
+                                "Patch field group failed (%s) — deleting and recreating with correct types: %s",
+                                patch_resp.status_code, patch_resp.text[:200],
+                            )
+                            del_resp = await client.delete(
+                                f"{base}/tenant/fieldgroups/{encoded_fg}",
+                                headers=_sr_headers(auth),
+                            )
+                            if del_resp.status_code in (200, 204):
+                                log.info("Deleted old field group %s — will recreate", fg_id)
+                            else:
+                                log.warning("Delete field group failed (%s) — %s", del_resp.status_code, del_resp.text[:100])
+                            # Fall through to POST block to recreate with correct types
+                    else:
+                        data["fieldGroupId"] = fg_id
+                        log.info("Field group %r already exists — reusing %s", title, fg_id)
+                        return data
 
         resp = await client.post(
             f"{base}/tenant/fieldgroups",
