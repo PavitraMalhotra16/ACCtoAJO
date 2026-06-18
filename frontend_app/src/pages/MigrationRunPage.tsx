@@ -155,9 +155,6 @@ function MigrationDashboard({ job, startedAt }: { job: MigrationJob; startedAt: 
   const completed = job.schemas.filter(s => s.status === 'COMPLETED')
   const failed = job.schemas.filter(s => s.status === 'FAILED')
   const queued = job.schemas.filter(s => s.status === 'QUEUED')
-  const identityUnresolved = job.schemas.filter(
-    s => s.status === 'COMPLETED' && s.identity_is_primary === null
-  ).length
   const allDone = job.running === 0 && job.queued === 0
   const QUEUED_PREVIEW = 2
 

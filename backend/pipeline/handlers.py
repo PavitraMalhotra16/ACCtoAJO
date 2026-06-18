@@ -92,7 +92,32 @@ def _infer_behavior(source_name: str, root_name: str) -> str:
     return "time-series" if any(kw in combined for kw in _TIME_SERIES_KEYWORDS) else "record"
 
 
+# Rule 3: well-known field names → standard AEP identity namespaces
+_NAME_TO_NAMESPACE: dict[str, str] = {
+    "email":       "Email",
+    "emailaddress": "Email",
+    "externid":    "ECID",
+    "externalid":  "ECID",
+    "ecid":        "ECID",
+    "customerid":  "CustomerID",
+    "userid":      "UserID",
+    "phonenumber": "Phone",
+    "phone":       "Phone",
+    "mobilenumber": "Phone",
+}
+
+_RULE3_NAMES = {"email", "emailaddress", "externalid", "externid", "ecid", "customerid", "userid", "phonenumber", "phone", "mobilenumber"}
+
+
+def _auto_map_namespace(field_name: str) -> str | None:
+    """Return a standard AEP namespace if field_name is a known identity field, else None."""
+    return _NAME_TO_NAMESPACE.get((field_name or "").lower())
+
+
 def _derive_namespace(field_name: str) -> str:
+    mapped = _auto_map_namespace(field_name)
+    if mapped:
+        return mapped
     if not field_name:
         return "CustomID"
     return field_name[0].upper() + field_name[1:]
@@ -170,8 +195,10 @@ async def map_types(ctx: dict, data: dict) -> dict:
 
 async def resolve_identity(ctx: dict, data: dict) -> dict:
     keys = data.get("keys", {})
+    attributes = data.get("attributes", [])
     auto_pk = keys.get("autoPk", {})
 
+    # Rule 1a: auto-generated surrogate key
     if auto_pk.get("enabled"):
         field = auto_pk.get("field") or "id"
         data["identityDecision"] = {
@@ -182,6 +209,7 @@ async def resolve_identity(ctx: dict, data: dict) -> dict:
         }
         return data
 
+    # Rule 1b: explicit primary key
     primary_keys = keys.get("primaryKeys", [])
     if primary_keys:
         fields = primary_keys[0].get("fields", [])
@@ -194,23 +222,43 @@ async def resolve_identity(ctx: dict, data: dict) -> dict:
             }
             return data
 
+    # Rule 2: first unique key (string or int64)
     unique_keys = keys.get("uniqueKeys", [])
     if unique_keys:
         fields = unique_keys[0].get("fields", [])
-        field = fields[0] if fields else "id"
-        data["identityDecision"] = {
-            "status": "resolved",
-            "fieldPath": f"/{field}",
-            "isPrimary": True,
-            "reason": "No explicit PK — first unique key used as primary identity",
-        }
-        return data
+        field = fields[0] if fields else None
+        if field:
+            data["identityDecision"] = {
+                "status": "resolved",
+                "fieldPath": f"/{field}",
+                "isPrimary": True,
+                "reason": "No explicit PK — first unique key used as primary identity",
+            }
+            return data
 
+    # Rule 3: well-known field name pattern matching
+    for attr in attributes:
+        name = (attr.get("name") or "").lower()
+        if name in _RULE3_NAMES:
+            original_name = attr["name"]
+            namespace = _auto_map_namespace(original_name)
+            data["identityDecision"] = {
+                "status": "resolved",
+                "fieldPath": f"/{original_name}",
+                "isPrimary": True,
+                "namespace": namespace,
+                "reason": f"Field name {original_name!r} matched known identity pattern — auto-mapped to {namespace}",
+            }
+            log.info("Rule 3 identity match: %s → namespace %s", original_name, namespace)
+            return data
+
+    # No identity found — warn, do not silently default
+    log.warning("No identity field found for schema %s", ctx.get("schema_name", "unknown"))
     data["identityDecision"] = {
-        "status": "resolved",
-        "fieldPath": "/id",
-        "isPrimary": False,
-        "reason": "No primary or unique keys found — defaulted to surrogate identity",
+        "status": "unresolved",
+        "fieldPath": None,
+        "isPrimary": None,
+        "reason": "No primary key, unique key, or known identity field name found — manual mapping required",
     }
     return data
 
@@ -292,8 +340,10 @@ async def make_enriched_json(ctx: dict, data: dict) -> dict:
     root_name = root.get("name") or ""
     behavior = _infer_behavior(source_name, root_name)
 
-    primary_key = identity.get("fieldPath", "/id").lstrip("/")
-    identity_namespace = _derive_namespace(primary_key)
+    field_path = identity.get("fieldPath")
+    primary_key = field_path.lstrip("/") if field_path else None
+    # Use the namespace already resolved by Rule 3 if present, else derive from field name
+    identity_namespace = identity.get("namespace") or (_derive_namespace(primary_key) if primary_key else None)
 
     version_field = _find_version_field(attributes)
     timestamp_field = _find_timestamp_field(attributes) if behavior == "time-series" else None
@@ -304,6 +354,7 @@ async def make_enriched_json(ctx: dict, data: dict) -> dict:
         "behavior": behavior,
         "primaryKey": primary_key,
         "identityNamespace": identity_namespace,
+        "identityUnresolved": identity.get("status") == "unresolved",
         "fields": _build_fields(attributes, xdm_types),
         "relationships": _build_relationships(links_and_joins),
     }
