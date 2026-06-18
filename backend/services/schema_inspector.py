@@ -49,7 +49,6 @@ def parse_schema_to_xdm(xml_text: str, namespace: str, name: str) -> dict:
     source = {
         "schemaType":     f"xtk:{schema_type}",
         "fullName":       full_name,
-        "namespace":      namespace,
         "name":           name,
         "rawXmlCaptured": True,
     }
@@ -123,12 +122,16 @@ def parse_schema_to_xdm(xml_text: str, namespace: str, name: str) -> dict:
     for attr in main_el:
         if _local(attr.tag) != "attribute":
             continue
+        attr_type = attr.get("type") or "string"
+        attr_length = attr.get("length")
+        if attr_type == "string" and not attr_length:
+            attr_length = "255"
         attributes.append({
             "name":         attr.get("name"),
             "label":        attr.get("label"),
             "xpath":        f"@{attr.get('name')}",
-            "type":         attr.get("type") or "string",
-            "length":       attr.get("length"),
+            "type":         attr_type,
+            "length":       attr_length,
             "sqlName":      attr.get("sqlname") or attr.get("sqlfieldname") or attr.get("name"),
             "description":  attr.get("desc"),
             "required":     _bool(attr.get("required")),

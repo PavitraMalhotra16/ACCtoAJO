@@ -9,11 +9,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     # PostgreSQL  – asyncpg driver
-    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/acc_ajo"
+    database_url: str = "postgresql+asyncpg://postgres:pavitra@localhost:5432/acc_ajo"
 
     # Fernet encryption key for secrets stored in DB
     # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-    encryption_key: str = "CHANGE_ME_generate_a_real_fernet_key"
+    encryption_key: str = "aokq3LGot2Tr7FBn4GZ6m-NcvRzmD7oheWv359_ZXcY="
 
     # Adobe Campaign Classic
     acc_endpoint: str = "http://127.0.0.1:8080/nl/jsp/soaprouter.jsp"

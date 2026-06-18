@@ -28,7 +28,7 @@ router = APIRouter(prefix="/api/convert")
 SOAP_TIMEOUT = 30.0
 _jobs: dict[str, dict] = {}
 
-EXCLUDED_NAMESPACES = {"crm", "ncm", "nms", "xtk", "nl"}
+EXCLUDED_NAMESPACES = {"crm", "ncm", "nms", "xtk","nl"}
 
 
 class SchemaRef(BaseModel):
