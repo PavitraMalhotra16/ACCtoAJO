@@ -602,9 +602,33 @@ async def call_fieldgroup_api(ctx: dict, data: dict) -> dict:
                             return data
                         else:
                             log.warning(
-                                "Patch field group failed (%s) — deleting and recreating with correct types: %s",
+                                "Patch field group failed (%s) — will detach, delete, and recreate: %s",
                                 patch_resp.status_code, patch_resp.text[:200],
                             )
+                            # Must detach from schema before AEP will allow deletion
+                            schema_id = data.get("schemaId")
+                            if schema_id:
+                                encoded_schema = quote(schema_id, safe="")
+                                schema_resp = await client.get(
+                                    f"{base}/tenant/schemas/{encoded_schema}",
+                                    headers=_sr_headers(auth, accept="application/vnd.adobe.xed+json; version=1"),
+                                )
+                                if schema_resp.status_code == 200:
+                                    all_of = schema_resp.json().get("allOf", [])
+                                    idx = next(
+                                        (i for i, ref in enumerate(all_of) if ref.get("$ref") == fg_id),
+                                        None,
+                                    )
+                                    if idx is not None:
+                                        detach = await client.patch(
+                                            f"{base}/tenant/schemas/{encoded_schema}",
+                                            headers=_sr_headers(auth, content_type=True),
+                                            json=[{"op": "remove", "path": f"/allOf/{idx}"}],
+                                        )
+                                        if detach.status_code in (200, 201):
+                                            log.info("Detached field group from schema %s", schema_id)
+                                        else:
+                                            log.warning("Detach field group failed (%s) — %s", detach.status_code, detach.text[:100])
                             del_resp = await client.delete(
                                 f"{base}/tenant/fieldgroups/{encoded_fg}",
                                 headers=_sr_headers(auth),
