@@ -155,9 +155,6 @@ function MigrationDashboard({ job, startedAt }: { job: MigrationJob; startedAt: 
   const completed = job.schemas.filter(s => s.status === 'COMPLETED')
   const failed = job.schemas.filter(s => s.status === 'FAILED')
   const queued = job.schemas.filter(s => s.status === 'QUEUED')
-  const identityUnresolved = job.schemas.filter(
-    s => s.status === 'COMPLETED' && s.identity_is_primary === null
-  ).length
   const allDone = job.running === 0 && job.queued === 0
   const QUEUED_PREVIEW = 2
 
@@ -179,7 +176,7 @@ function MigrationDashboard({ job, startedAt }: { job: MigrationJob; startedAt: 
           { label: 'Total', value: job.total, color: 'text-gray-900' },
           { label: 'Completed', value: job.completed, color: 'text-green-600' },
           { label: 'In progress', value: job.running, color: 'text-blue-600' },
-          { label: 'Identity unresolved', value: identityUnresolved, color: 'text-orange-600' },
+          { label: 'Failed', value: job.failed, color: 'text-red-600' },
         ].map(card => (
           <div key={card.label} className="bg-gray-50 border border-gray-200 rounded-xl px-4 py-3">
             <p className="text-xs text-gray-400 mb-1">{card.label}</p>
