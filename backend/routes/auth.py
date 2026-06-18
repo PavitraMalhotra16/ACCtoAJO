@@ -37,6 +37,19 @@ class AccLoginRequest(BaseModel):
     instanceUrl: str
 
 
+class AccConnectRequest(BaseModel):
+    auth_type: str  # 'classic' | 'technical'
+    instance_url: str
+    # classic fields
+    login: Optional[str] = None
+    password: Optional[str] = None
+    # technical fields
+    org_id: Optional[str] = None
+    client_id: Optional[str] = None
+    client_secret: Optional[str] = None
+    scope: Optional[str] = None
+
+
 class AjoConnectRequest(BaseModel):
     org_id: str
     client_id: str
@@ -218,4 +231,197 @@ async def connections_status(
         "sourceLoginId": src.login_id if src else None,
         "destinationOrgId": dst.org_id if dst else None,
         "destinationSandboxName": dst.sandbox_name if dst else None,
+    }
+
+
+@router.post("/api/acc/connect")
+async def acc_connect(
+    body: AccConnectRequest,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    if body.auth_type == "classic":
+        if not body.login or not body.password:
+            raise HTTPException(400, "login and password are required for classic auth")
+        soap_url = body.instance_url.rstrip("/") + "/nl/jsp/soaprouter.jsp"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                logon = await client.post(
+                    soap_url,
+                    content=build_logon_envelope(body.login, body.password),
+                    headers={"Content-Type": "text/xml; charset=utf-8", "SOAPAction": "xtk:session#Logon"},
+                )
+            except httpx.RequestError:
+                raise HTTPException(502, "Cannot reach Adobe Campaign Classic")
+            if logon.status_code != 200:
+                raise HTTPException(401, parse_fault(logon.text) or "Logon failed")
+            session_token, security_token = parse_logon_response(logon.text)
+            if not session_token:
+                raise HTTPException(401, parse_fault(logon.text) or "Authentication failed")
+            test = await client.post(
+                soap_url,
+                content=build_test_cnx_envelope(session_token, security_token),
+                headers={
+                    "Content-Type": "text/xml; charset=utf-8",
+                    "SOAPAction": "xtk:session#TestCnx",
+                    "Cookie": f"__sessiontoken={session_token}",
+                    "X-Security-Token": security_token,
+                },
+            )
+            if parse_fault(test.text):
+                raise HTTPException(401, parse_fault(test.text))
+
+        result = await db.execute(select(SourceConnection).where(SourceConnection.login_id == body.login))
+        conn = result.scalar_one_or_none()
+        now = datetime.now(timezone.utc)
+        if conn:
+            conn.encrypted_password = encrypt(body.password)
+            conn.instance_url = body.instance_url
+            conn.session_token = session_token
+            conn.security_token = security_token
+            conn.authenticated = True
+            conn.last_authenticated_at = now
+        else:
+            conn = SourceConnection(
+                login_id=body.login,
+                instance_url=body.instance_url,
+                encrypted_password=encrypt(body.password),
+                session_token=session_token,
+                security_token=security_token,
+                authenticated=True,
+                last_authenticated_at=now,
+            )
+            db.add(conn)
+
+        session_id = str(uuid.uuid4())
+        db.add(UserSession(
+            id=session_id,
+            login_id=body.login,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS),
+        ))
+        await db.commit()
+        response.set_cookie(key="acc_session", value=session_id, httponly=True, samesite="lax",
+                            max_age=SESSION_TTL_DAYS * 24 * 3600)
+        response.set_cookie(key="acc_user", value=body.login, httponly=True, samesite="lax",
+                            max_age=USER_COOKIE_TTL_DAYS * 24 * 3600)
+        return {"success": True, "authenticated": True, "login": body.login}
+
+    elif body.auth_type == "technical":
+        if not body.client_id or not body.client_secret or not body.scope:
+            raise HTTPException(400, "client_id, client_secret, and scope are required for technical auth")
+        scopes = body.scope if body.scope else IMS_SCOPES
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                token_resp = await client.post(
+                    IMS_TOKEN_URL,
+                    data={
+                        "grant_type": "client_credentials",
+                        "client_id": body.client_id,
+                        "client_secret": body.client_secret,
+                        "scope": scopes,
+                    },
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+            except httpx.RequestError:
+                raise HTTPException(502, "Cannot reach Adobe IMS")
+        if token_resp.status_code != 200:
+            raise HTTPException(401, "IMS authentication failed – check credentials")
+        payload = token_resp.json()
+        access_token = payload.get("access_token")
+        if not access_token:
+            raise HTTPException(401, "IMS did not return an access token")
+
+        login_id = body.client_id
+        now = datetime.now(timezone.utc)
+        result = await db.execute(select(SourceConnection).where(SourceConnection.login_id == login_id))
+        conn = result.scalar_one_or_none()
+        if conn:
+            conn.encrypted_password = encrypt(body.client_secret)
+            conn.instance_url = body.instance_url
+            conn.session_token = access_token
+            conn.security_token = ""
+            conn.authenticated = True
+            conn.last_authenticated_at = now
+        else:
+            conn = SourceConnection(
+                login_id=login_id,
+                instance_url=body.instance_url,
+                encrypted_password=encrypt(body.client_secret),
+                session_token=access_token,
+                security_token="",
+                authenticated=True,
+                last_authenticated_at=now,
+            )
+            db.add(conn)
+
+        session_id = str(uuid.uuid4())
+        db.add(UserSession(
+            id=session_id,
+            login_id=login_id,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS),
+        ))
+        await db.commit()
+        response.set_cookie(key="acc_session", value=session_id, httponly=True, samesite="lax",
+                            max_age=SESSION_TTL_DAYS * 24 * 3600)
+        response.set_cookie(key="acc_user", value=login_id, httponly=True, samesite="lax",
+                            max_age=USER_COOKIE_TTL_DAYS * 24 * 3600)
+        return {"success": True, "authenticated": True, "login": login_id}
+
+    else:
+        raise HTTPException(400, f"Unknown auth_type: {body.auth_type}")
+
+
+@router.post("/api/acc/disconnect")
+async def acc_disconnect(
+    response: Response,
+    acc_session: Optional[str] = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    if acc_session:
+        result = await db.execute(select(UserSession).where(UserSession.id == acc_session))
+        session = result.scalar_one_or_none()
+        if session:
+            await db.delete(session)
+            await db.commit()
+    response.delete_cookie("acc_session")
+    response.delete_cookie("acc_user")
+    return {"success": True}
+
+
+@router.get("/api/acc/status")
+async def acc_status(
+    acc_session: Optional[str] = Cookie(default=None),
+    acc_user: Optional[str] = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    login_id = await get_login_from_cookie(acc_session, db, acc_user)
+    if not login_id:
+        return {"connected": False, "login": None}
+    result = await db.execute(
+        select(SourceConnection).where(
+            SourceConnection.login_id == login_id,
+            SourceConnection.authenticated == True,
+        )
+    )
+    src = result.scalar_one_or_none()
+    return {"connected": src is not None, "login": src.login_id if src else None}
+
+
+@router.get("/api/ajo/status")
+async def ajo_status(
+    acc_session: Optional[str] = Cookie(default=None),
+    acc_user: Optional[str] = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    login_id = await get_login_from_cookie(acc_session, db, acc_user)
+    if not login_id:
+        return {"connected": False, "org_id": None, "sandbox_name": None}
+    result = await db.execute(
+        select(DestinationConnection).where(DestinationConnection.authenticated == True)
+    )
+    dst = result.scalar_one_or_none()
+    return {
+        "connected": dst is not None,
+        "org_id": dst.org_id if dst else None,
+        "sandbox_name": dst.sandbox_name if dst else None,
     }
