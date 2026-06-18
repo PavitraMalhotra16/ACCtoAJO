@@ -1,28 +1,48 @@
 import json
 import pytest
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
 # ── LOAD_JSON ────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_load_json_reads_file(tmp_path):
+async def test_load_json_reads_from_db():
     from pipeline.handlers import load_json
-    schema_file = tmp_path / "cus_recipient.json"
-    data = {"source": {"fullName": "cus:recipient"}, "attributes": []}
-    schema_file.write_text(json.dumps(data))
-    ctx = {"schema_storage_path": str(schema_file), "login_id": "u1", "schema_name": "cus:recipient", "org_id": "x"}
-    result = await load_json(ctx, {})
-    assert result == data
+
+    raw = {"source": {"fullName": "cus:recipient"}, "attributes": []}
+    mock_schema = MagicMock()
+    mock_schema.raw_json = json.dumps(raw)
+
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_result = MagicMock()
+    mock_result.scalar_one.return_value = mock_schema
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    with patch("pipeline.handlers.AsyncSessionLocal", return_value=mock_session):
+        result = await load_json({"converted_schema_id": "abc-123"}, {})
+
+    assert result == raw
 
 
 @pytest.mark.asyncio
-async def test_load_json_missing_file(tmp_path):
+async def test_load_json_invalid_json_raises():
     from pipeline.handlers import load_json
-    ctx = {"schema_storage_path": str(tmp_path / "missing.json"), "login_id": "u1", "schema_name": "cus:x", "org_id": "x"}
-    with pytest.raises(FileNotFoundError):
-        await load_json(ctx, {})
+
+    mock_schema = MagicMock()
+    mock_schema.raw_json = "not valid json{"
+
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_result = MagicMock()
+    mock_result.scalar_one.return_value = mock_schema
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    with patch("pipeline.handlers.AsyncSessionLocal", return_value=mock_session):
+        with pytest.raises(json.JSONDecodeError):
+            await load_json({"converted_schema_id": "abc-123"}, {})
 
 
 # ── MAP_TYPES ────────────────────────────────────────────────────────────────
@@ -143,17 +163,100 @@ async def test_fetch_tenant_id_uses_cache():
     assert result["tenantId"] == "_acmecorp"
 
 
+# ── BUILD_PAYLOAD ─────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_build_payload_record_behavior():
+    from pipeline.handlers import build_payload
+    data = {
+        "source": {"fullName": "cus:recipient", "name": "recipient"},
+        "schema": {"label": "Recipients", "description": "All recipients"},
+        "rootElement": {"name": "recipient"},
+        "attributes": [
+            {"name": "crmId", "label": "CRM ID", "type": "string"},
+            {"name": "email", "label": "Email", "type": "string"},
+            {"name": "lastModified", "label": "Last Modified", "type": "datetime"},
+        ],
+        "xdmTypes": {
+            "crmId": {"type": "string"},
+            "email": {"type": "string"},
+            "lastModified": {"type": "string", "format": "date-time"},
+        },
+        "identityDecision": {"fieldPath": "/crmId", "isPrimary": True},
+        "linksAndJoins": [],
+    }
+    result = await build_payload({}, data)
+    payload = result["ajoPayload"]
+    assert payload["title"] == "Recipients"
+    assert payload["description"] == "All recipients"
+    assert payload["behavior"] == "record"
+    assert payload["primaryKey"] == "crmId"
+    assert payload["identityNamespace"] == "CrmId"
+    assert payload["versionField"] == "lastModified"
+    assert "timestampField" not in payload
+    assert len(payload["fields"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_build_payload_time_series_behavior():
+    from pipeline.handlers import build_payload
+    data = {
+        "source": {"fullName": "cus:trackingLog", "name": "trackingLog"},
+        "schema": {"label": "Tracking Log", "description": ""},
+        "rootElement": {"name": "trackingLog"},
+        "attributes": [
+            {"name": "id", "label": "ID", "type": "int32"},
+            {"name": "tsEvent", "label": "Event Time", "type": "datetime"},
+        ],
+        "xdmTypes": {
+            "id": {"type": "integer"},
+            "tsEvent": {"type": "string", "format": "date-time"},
+        },
+        "identityDecision": {"fieldPath": "/id", "isPrimary": False},
+        "linksAndJoins": [],
+    }
+    result = await build_payload({}, data)
+    payload = result["ajoPayload"]
+    assert payload["behavior"] == "time-series"
+    assert payload["timestampField"] == "tsEvent"
+
+
+@pytest.mark.asyncio
+async def test_build_payload_relationships():
+    from pipeline.handlers import build_payload
+    data = {
+        "source": {"fullName": "cus:order"},
+        "schema": {"label": "Orders", "description": ""},
+        "rootElement": {"name": "order"},
+        "attributes": [],
+        "xdmTypes": {},
+        "identityDecision": {"fieldPath": "/id"},
+        "linksAndJoins": [
+            {
+                "name": "recipient",
+                "targetSchema": "cus:recipient",
+                "join": {"sourceField": "iRecipientId", "destinationField": "iRecipientId"},
+                "cardinality": "many-to-one",
+            }
+        ],
+    }
+    result = await build_payload({}, data)
+    rels = result["ajoPayload"]["relationships"]
+    assert len(rels) == 1
+    assert rels[0]["targetSchema"] == "cus:recipient"
+    assert rels[0]["cardinality"] == "many-to-one"
+
+
 # ── STUBS ────────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_stubs_pass_data_through():
     from pipeline.handlers import (
-        build_payload_stub,
         call_schema_api_stub,
         call_identity_descriptor_stub,
         verify_stub,
     )
-    original = {"tenantId": "_test", "identityDecision": {"isPrimary": True}}
-    for stub in [build_payload_stub, call_schema_api_stub, call_identity_descriptor_stub, verify_stub]:
+    original = {"tenantId": "_test", "ajoPayload": {"title": "Test"}}
+    for stub in [call_schema_api_stub, call_identity_descriptor_stub, verify_stub]:
         result = await stub({}, dict(original))
         assert result["tenantId"] == "_test"

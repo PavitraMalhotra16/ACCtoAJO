@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import uuid
 from typing import Optional
@@ -49,11 +50,20 @@ async def migrate_start(
 
     to_migrate = [s for s in converted if s.schema_name not in done_names]
     if not to_migrate:
-        return {
-            "message": "all_done",
-            "total": len(converted),
-            "skipped": len(done_names),
-        }
+        return {"message": "all_done", "total": len(converted), "skipped": len(done_names)}
+
+    # Load last FAILED snapshot per schema_name for resume
+    failed_result = await db.execute(
+        select(SchemaJobItem).where(
+            SchemaJobItem.login_id == login_id,
+            SchemaJobItem.status == "FAILED",
+        ).order_by(SchemaJobItem.created_at.desc())
+    )
+    failed_items = failed_result.scalars().all()
+    last_failed: dict[str, SchemaJobItem] = {}
+    for fi in failed_items:
+        if fi.schema_name not in last_failed:
+            last_failed[fi.schema_name] = fi
 
     job_id = str(uuid.uuid4())
     items: list[dict] = []
@@ -66,10 +76,17 @@ async def migrate_start(
         )
         db.add(item)
         await db.flush()
+
+        prev_failed = last_failed.get(s.schema_name)
+        resume_from_step = prev_failed.current_step_order if prev_failed and prev_failed.current_snapshot else 0
+        resume_data = json.loads(prev_failed.current_snapshot) if prev_failed and prev_failed.current_snapshot else None
+
         items.append({
             "id": item.id,
             "schema_name": s.schema_name,
-            "storage_path": s.storage_path,
+            "converted_schema_id": s.id,
+            "resume_from_step": resume_from_step,
+            "resume_data": resume_data,
         })
     await db.commit()
 
@@ -171,8 +188,6 @@ async def schema_item_detail(
         "current_step": item.current_step,
         "current_step_order": item.current_step_order,
         "identity_is_primary": item.identity_is_primary,
-        "tmp_file_path": item.tmp_file_path,
-        "final_file_path": item.final_file_path,
         "error_message": item.error_message,
         "created_at": item.created_at.isoformat(),
         "updated_at": item.updated_at.isoformat(),

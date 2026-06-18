@@ -37,7 +37,7 @@ PIPELINE_STEPS: list[PipelineStep] = [
     PipelineStep(
         name="BUILD_PAYLOAD",
         label="Assemble AJO schema payload",
-        handler="pipeline.handlers.build_payload_stub",
+        handler="pipeline.handlers.build_payload",
         order=5,
     ),
     PipelineStep(

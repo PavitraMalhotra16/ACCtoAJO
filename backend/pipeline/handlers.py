@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 from sqlalchemy import select
 
-from db import AsyncSessionLocal, DestinationConnection, TenantConfig
+from db import AsyncSessionLocal, ConvertedSchema, DestinationConnection, TenantConfig
 from core.security import decrypt
 
 log = logging.getLogger("acc_backend.pipeline.handlers")
@@ -26,10 +26,76 @@ ACC_TO_XDM: dict[str, dict] = {
     "date":     {"type": "string", "format": "date"},
 }
 
+_TIME_SERIES_KEYWORDS = {"log", "tracking", "history", "broadlog", "event", "histo", "delivery", "statistics"}
+_VERSION_FIELD_PATTERNS = {"lastmodified", "tslastmodified", "lastupdate", "modifieddate", "updatedat", "dtmodified", "tsmodification", "tschanged", "modified"}
+_TIMESTAMP_FIELD_PATTERNS = {"tsevent", "timestamp", "eventdate", "logdate", "eventts", "eventtime", "tscreated"}
+
+
+def _infer_behavior(source_name: str, root_name: str) -> str:
+    combined = (source_name + root_name).lower()
+    return "time-series" if any(kw in combined for kw in _TIME_SERIES_KEYWORDS) else "record"
+
+
+def _derive_namespace(field_name: str) -> str:
+    if not field_name:
+        return "CustomID"
+    return field_name[0].upper() + field_name[1:]
+
+
+def _find_version_field(attributes: list[dict]) -> str | None:
+    for attr in attributes:
+        if any(p in (attr.get("name") or "").lower() for p in _VERSION_FIELD_PATTERNS):
+            return attr["name"]
+    for attr in attributes:
+        if (attr.get("type") or "").lower() in ("datetime", "date"):
+            return attr["name"]
+    return None
+
+
+def _find_timestamp_field(attributes: list[dict]) -> str | None:
+    for attr in attributes:
+        if any(p in (attr.get("name") or "").lower() for p in _TIMESTAMP_FIELD_PATTERNS):
+            return attr["name"]
+    return None
+
+
+def _build_fields(attributes: list[dict], xdm_types: dict) -> list[dict]:
+    fields = []
+    for attr in attributes:
+        name = attr.get("name")
+        if not name:
+            continue
+        xdm = xdm_types.get(name, {"type": "string"})
+        field: dict = {"name": name, "title": attr.get("label") or name, "type": xdm.get("type", "string")}
+        if "format" in xdm:
+            field["format"] = xdm["format"]
+        fields.append(field)
+    return fields
+
+
+def _build_relationships(links_and_joins: list[dict]) -> list[dict]:
+    result = []
+    for link in links_and_joins:
+        if not link.get("targetSchema"):
+            continue
+        join = link.get("join", {})
+        result.append({
+            "name": link.get("name"),
+            "sourceField": join.get("sourceField"),
+            "targetSchema": link["targetSchema"],
+            "targetField": join.get("destinationField"),
+            "cardinality": link.get("cardinality"),
+        })
+    return result
+
 
 async def load_json(ctx: dict, data: dict) -> dict:
-    with open(ctx["schema_storage_path"], "r", encoding="utf-8") as f:
-        return json.load(f)
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(ConvertedSchema).where(ConvertedSchema.id == ctx["converted_schema_id"])
+        )
+        schema = result.scalar_one()
+        return json.loads(schema.raw_json)
 
 
 async def map_types(ctx: dict, data: dict) -> dict:
@@ -156,7 +222,41 @@ async def fetch_tenant_id(ctx: dict, data: dict) -> dict:
     return data
 
 
-async def build_payload_stub(ctx: dict, data: dict) -> dict:
+async def build_payload(ctx: dict, data: dict) -> dict:
+    source = data.get("source", {})
+    schema_meta = data.get("schema", {})
+    root = data.get("rootElement", {})
+    attributes = data.get("attributes", [])
+    xdm_types = data.get("xdmTypes", {})
+    identity = data.get("identityDecision", {})
+    links_and_joins = data.get("linksAndJoins", [])
+
+    source_name = source.get("name") or source.get("fullName", "")
+    root_name = root.get("name") or ""
+    behavior = _infer_behavior(source_name, root_name)
+
+    primary_key = identity.get("fieldPath", "/id").lstrip("/")
+    identity_namespace = _derive_namespace(primary_key)
+
+    version_field = _find_version_field(attributes)
+    timestamp_field = _find_timestamp_field(attributes) if behavior == "time-series" else None
+
+    payload: dict = {
+        "title": schema_meta.get("label") or root.get("label") or source_name,
+        "description": schema_meta.get("description") or "",
+        "behavior": behavior,
+        "primaryKey": primary_key,
+        "identityNamespace": identity_namespace,
+        "fields": _build_fields(attributes, xdm_types),
+        "relationships": _build_relationships(links_and_joins),
+    }
+    if version_field:
+        payload["versionField"] = version_field
+    if timestamp_field:
+        payload["timestampField"] = timestamp_field
+
+    data["ajoPayload"] = payload
+    log.info("Built payload for %s: behavior=%s primaryKey=%s", source_name, behavior, primary_key)
     return data
 
 

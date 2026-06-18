@@ -1,13 +1,13 @@
 import asyncio
 import importlib
+import json
 import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from db import AsyncSessionLocal, SchemaJobItem
+from db import AsyncSessionLocal, ConvertedSchema, SchemaJobItem
 from pipeline_steps import PIPELINE_STEPS
-from pipeline.file_manager import write_tmp, finalize, cleanup_tmp
 
 log = logging.getLogger("acc_backend.pipeline.runner")
 
@@ -27,8 +27,7 @@ async def _update_item(
     step_order: int,
     error: str | None = None,
     identity_is_primary: bool | None = None,
-    final_file_path: str | None = None,
-    tmp_file_path: str | None = None,
+    current_snapshot: str | None = None,
 ) -> None:
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -43,12 +42,20 @@ async def _update_item(
             item.error_message = error
         if identity_is_primary is not None:
             item.identity_is_primary = identity_is_primary
-        if final_file_path is not None:
-            item.final_file_path = final_file_path
-        if tmp_file_path is not None:
-            item.tmp_file_path = tmp_file_path
+        if current_snapshot is not None:
+            item.current_snapshot = current_snapshot
         if status == "COMPLETED":
             item.completed_at = datetime.now(timezone.utc)
+        await db.commit()
+
+
+async def _write_enriched_json(converted_schema_id: str, payload: dict) -> None:
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(ConvertedSchema).where(ConvertedSchema.id == converted_schema_id)
+        )
+        schema = result.scalar_one()
+        schema.enriched_json = json.dumps(payload)
         await db.commit()
 
 
@@ -56,27 +63,34 @@ async def run_schema(
     item_id: str,
     login_id: str,
     schema_name: str,
-    schema_storage_path: str,
+    converted_schema_id: str,
     org_id: str,
     job_sem: asyncio.Semaphore,
+    resume_from_step: int = 0,
+    resume_data: dict | None = None,
 ) -> None:
     async with _GLOBAL_SEM:
         async with job_sem:
             ctx = {
                 "login_id": login_id,
                 "schema_name": schema_name,
-                "schema_storage_path": schema_storage_path,
+                "converted_schema_id": converted_schema_id,
                 "org_id": org_id,
             }
-            data: dict = {}
+            data: dict = resume_data or {}
 
             for step in PIPELINE_STEPS:
+                if step.order <= resume_from_step:
+                    continue
+
                 await _update_item(item_id, "RUNNING", step.name, step.order)
                 try:
                     handler = await _load_handler(step.handler)
                     data = await handler(ctx, data)
-                    tmp = write_tmp(login_id, schema_name, data)
-                    await _update_item(item_id, "RUNNING", step.name, step.order, tmp_file_path=str(tmp))
+                    await _update_item(
+                        item_id, "RUNNING", step.name, step.order,
+                        current_snapshot=json.dumps(data),
+                    )
 
                     if step.name == "RESOLVE_IDENTITY":
                         identity = data.get("identityDecision", {})
@@ -92,13 +106,10 @@ async def run_schema(
                     )
                     return
 
-            final_path = finalize(login_id, schema_name)
-            await _update_item(
-                item_id, "COMPLETED", "COMPLETED", len(PIPELINE_STEPS),
-                final_file_path=str(final_path),
-            )
-            cleanup_tmp(login_id)
-            log.info("Schema %s migrated successfully → %s", schema_name, final_path)
+            ajo_payload = data.get("ajoPayload", data)
+            await _write_enriched_json(converted_schema_id, ajo_payload)
+            await _update_item(item_id, "COMPLETED", "COMPLETED", len(PIPELINE_STEPS))
+            log.info("Schema %s migrated successfully", schema_name)
 
 
 async def run_migration_job(
@@ -114,9 +125,11 @@ async def run_migration_job(
                 item_id=item["id"],
                 login_id=login_id,
                 schema_name=item["schema_name"],
-                schema_storage_path=item["storage_path"],
+                converted_schema_id=item["converted_schema_id"],
                 org_id=org_id,
                 job_sem=job_sem,
+                resume_from_step=item.get("resume_from_step", 0),
+                resume_data=item.get("resume_data"),
             )
         )
         for item in schema_items

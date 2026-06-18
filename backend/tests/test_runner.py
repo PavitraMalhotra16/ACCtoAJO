@@ -1,37 +1,129 @@
 import asyncio
 import json
 import pytest
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
-@pytest.fixture
-def schema_file(tmp_path):
-    data = {
-        "source": {"fullName": "cus:test"},
-        "attributes": [{"name": "id", "type": "int32"}],
-        "keys": {"autoPk": {"enabled": True, "field": "id"}, "primaryKeys": [], "uniqueKeys": []},
-    }
-    p = tmp_path / "cus_test.json"
-    p.write_text(json.dumps(data))
-    return p
-
-
 @pytest.mark.asyncio
-async def test_run_schema_success(tmp_path, schema_file, monkeypatch):
-    monkeypatch.setenv("SCHEMA_STORAGE_DIR", str(tmp_path))
-
-    import importlib
-    import pipeline.file_manager as fm
-    importlib.reload(fm)
-
+async def test_run_schema_success():
     completed_statuses = []
 
     async def fake_update(item_id, status, step_name, step_order, error=None,
-                          identity_is_primary=None, final_file_path=None, tmp_file_path=None):
+                          identity_is_primary=None, current_snapshot=None):
         completed_statuses.append((status, step_name))
 
+    async def fake_write_enriched(converted_schema_id, payload):
+        pass
+
     with patch("pipeline.runner._update_item", side_effect=fake_update), \
+         patch("pipeline.runner._write_enriched_json", side_effect=fake_write_enriched), \
+         patch("pipeline.handlers.AsyncSessionLocal") as mock_session_cls:
+
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        raw_data = {
+            "source": {"fullName": "cus:test", "name": "test"},
+            "schema": {"label": "Test", "description": ""},
+            "rootElement": {"name": "test"},
+            "attributes": [{"name": "id", "type": "int32"}],
+            "keys": {"autoPk": {"enabled": True, "field": "id"}, "primaryKeys": [], "uniqueKeys": []},
+            "linksAndJoins": [],
+        }
+        mock_schema = MagicMock()
+        mock_schema.raw_json = json.dumps(raw_data)
+        mock_result = MagicMock()
+        mock_result.scalar_one.return_value = mock_schema
+        mock_result.scalar_one_or_none.return_value = None
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session_cls.return_value = mock_session
+
+        from pipeline.runner import run_schema
+        job_sem = asyncio.Semaphore(3)
+
+        with patch("pipeline.handlers.fetch_tenant_id", new=AsyncMock(
+            side_effect=lambda ctx, data: {**data, "tenantId": "_test"}
+        )):
+            await run_schema(
+                item_id="item-1",
+                login_id="user1",
+                schema_name="cus:test",
+                converted_schema_id="schema-id-1",
+                org_id="ORG@AdobeOrg",
+                job_sem=job_sem,
+            )
+
+    assert any(s == "COMPLETED" for s, _ in completed_statuses)
+
+
+@pytest.mark.asyncio
+async def test_run_schema_failure_at_step():
+    statuses = []
+
+    async def fake_update(item_id, status, step_name, step_order, error=None,
+                          identity_is_primary=None, current_snapshot=None):
+        statuses.append((status, step_name, error))
+
+    async def bad_map_types(ctx, data):
+        raise ValueError("type mapping exploded")
+
+    with patch("pipeline.runner._update_item", side_effect=fake_update), \
+         patch("pipeline.handlers.map_types", side_effect=bad_map_types), \
+         patch("pipeline.handlers.AsyncSessionLocal") as mock_session_cls:
+
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        raw_data = {"source": {"fullName": "cus:test"}, "attributes": []}
+        mock_schema = MagicMock()
+        mock_schema.raw_json = json.dumps(raw_data)
+        mock_result = MagicMock()
+        mock_result.scalar_one.return_value = mock_schema
+        mock_result.scalar_one_or_none.return_value = None
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session_cls.return_value = mock_session
+
+        from pipeline.runner import run_schema
+        job_sem = asyncio.Semaphore(3)
+        await run_schema(
+            item_id="item-2",
+            login_id="user1",
+            schema_name="cus:test",
+            converted_schema_id="schema-id-2",
+            org_id="ORG@AdobeOrg",
+            job_sem=job_sem,
+        )
+
+    failed = [(s, n, e) for s, n, e in statuses if s == "FAILED"]
+    assert len(failed) == 1
+    assert failed[0][1] == "MAP_TYPES"
+    assert "type mapping exploded" in failed[0][2]
+
+
+@pytest.mark.asyncio
+async def test_run_schema_resumes_from_snapshot():
+    completed_statuses = []
+
+    async def fake_update(item_id, status, step_name, step_order, error=None,
+                          identity_is_primary=None, current_snapshot=None):
+        completed_statuses.append((status, step_name))
+
+    async def fake_write_enriched(converted_schema_id, payload):
+        pass
+
+    resume_data = {
+        "source": {"fullName": "cus:test", "name": "test"},
+        "schema": {"label": "Test", "description": ""},
+        "rootElement": {"name": "test"},
+        "attributes": [{"name": "id", "type": "int32"}],
+        "keys": {"autoPk": {"enabled": True, "field": "id"}, "primaryKeys": [], "uniqueKeys": []},
+        "linksAndJoins": [],
+        "xdmTypes": {"id": {"type": "integer"}},
+        "identityDecision": {"fieldPath": "/id", "isPrimary": False, "status": "resolved"},
+    }
+
+    with patch("pipeline.runner._update_item", side_effect=fake_update), \
+         patch("pipeline.runner._write_enriched_json", side_effect=fake_write_enriched), \
          patch("pipeline.handlers.AsyncSessionLocal") as mock_session_cls:
 
         mock_session = AsyncMock()
@@ -49,48 +141,19 @@ async def test_run_schema_success(tmp_path, schema_file, monkeypatch):
             side_effect=lambda ctx, data: {**data, "tenantId": "_test"}
         )):
             await run_schema(
-                item_id="item-1",
+                item_id="item-3",
                 login_id="user1",
                 schema_name="cus:test",
-                schema_storage_path=str(schema_file),
+                converted_schema_id="schema-id-3",
                 org_id="ORG@AdobeOrg",
                 job_sem=job_sem,
+                resume_from_step=3,
+                resume_data=resume_data,
             )
 
-    final = list(filter(lambda x: x[0] == "COMPLETED", completed_statuses))
-    assert len(final) == 1
-
-
-@pytest.mark.asyncio
-async def test_run_schema_failure_at_step(tmp_path, schema_file, monkeypatch):
-    monkeypatch.setenv("SCHEMA_STORAGE_DIR", str(tmp_path))
-    import importlib
-    import pipeline.file_manager as fm
-    importlib.reload(fm)
-
-    statuses = []
-
-    async def fake_update(item_id, status, step_name, step_order, error=None,
-                          identity_is_primary=None, final_file_path=None, tmp_file_path=None):
-        statuses.append((status, step_name, error))
-
-    async def bad_map_types(ctx, data):
-        raise ValueError("type mapping exploded")
-
-    with patch("pipeline.runner._update_item", side_effect=fake_update), \
-         patch("pipeline.handlers.map_types", side_effect=bad_map_types):
-        from pipeline.runner import run_schema
-        job_sem = asyncio.Semaphore(3)
-        await run_schema(
-            item_id="item-2",
-            login_id="user1",
-            schema_name="cus:test",
-            schema_storage_path=str(schema_file),
-            org_id="ORG@AdobeOrg",
-            job_sem=job_sem,
-        )
-
-    failed = [(s, n, e) for s, n, e in statuses if s == "FAILED"]
-    assert len(failed) == 1
-    assert failed[0][1] == "MAP_TYPES"
-    assert "type mapping exploded" in failed[0][2]
+    # LOAD_JSON (step 1), MAP_TYPES (step 2), RESOLVE_IDENTITY (step 3) must be skipped
+    step_names_run = [name for _, name in completed_statuses]
+    assert "LOAD_JSON" not in step_names_run
+    assert "MAP_TYPES" not in step_names_run
+    assert "RESOLVE_IDENTITY" not in step_names_run
+    assert any(s == "COMPLETED" for s, _ in completed_statuses)
