@@ -1,0 +1,120 @@
+{
+  "source": {
+    "schemaType": "xtk:srcSchema",
+    "fullName": "namespace:name",
+    "namespace": "namespace",
+    "name": "name",
+    "rawXmlCaptured": true
+  },
+  "schema": {
+    "mainPageName": null,
+    "label": null,
+    "labelSingular": null,
+    "description": null,
+    "mappingType": null,
+    "entitySchema": null,
+    "type": "sql",
+    "view": false,
+    "library": false,
+    "extendedSchema": null,
+    "implements": null,
+    "doNotPersist": false,
+    "genAccessors": null
+  },
+  "rootElement": {
+    "name": null,
+    "label": null,
+    "sqlTable": null,
+    "isRootEntity": true,
+    "hierarchy": {
+      "hasSubElements": false,
+      "hasCollections": false,
+      "hierarchicalRelations": []
+    }
+  },
+  "elements": [
+    {
+      "name": null,
+      "label": null,
+      "xpath": null,
+      "type": "element",
+      "storage": {
+        "xml": false,
+        "sql": true
+      },
+      "children": [],
+      "attributes": [],
+      "links": []
+    }
+  ],
+  "attributes": [
+    {
+      "name": null,
+      "label": null,
+      "xpath": null,
+      "type": null,
+      "length": null,
+      "sqlName": null,
+      "description": null,
+      "required": false,
+      "nullable": true,
+      "notNull": false,
+      "defaultValue": null,
+      "expression": null,
+      "isCalculated": false,
+      "enumReference": null,
+      "xml": false,
+      "behavior": {
+        "availableBehavior": [],
+        "dataPolicy": null,
+        "readOnly": false,
+        "persistent": true,
+        "templateRef": null
+      }
+    }
+  ],
+  "keys": {
+    "autoPk": {
+      "enabled": false,
+      "field": null
+    },
+    "primaryKeys": [],
+    "logicalKeys": [],
+    "uniqueKeys": [],
+    "compositeKeys": [],
+    "authorKeys": [],
+    "foreignKeyStructures": []
+  },
+  "linksAndJoins": [
+    {
+      "name": null,
+      "label": null,
+      "targetSchema": null,
+      "reverseLinkName": null,
+      "sourceLinkName": null,
+      "join": {
+        "sourceField": null,
+        "destinationField": null,
+        "composite": false
+      },
+      "cardinality": null,
+      "integrity": null,
+      "reverseIntegrity": null,
+      "sourceLabel": null,
+      "destinationLabel": null
+    }
+  ],
+  "enums": [
+    {
+      "name": null,
+      "type": "systemEnum",
+      "description": null,
+      "values": []
+    }
+  ],
+  "extractionNotes": {
+    "fromSrcSchemaOnly": true,
+    "compiledSchemaRequiredForGeneratedDefaults": true,
+    "databaseMetadataRequiredForPhysicalIndexesAndRealFKs": true
+  }
+}

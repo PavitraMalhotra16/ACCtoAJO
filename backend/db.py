@@ -57,7 +57,6 @@ class ConvertedSchema(Base):
     job_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     login_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     schema_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    namespace: Mapped[str] = mapped_column(String(100), nullable=False)
     storage_path: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
