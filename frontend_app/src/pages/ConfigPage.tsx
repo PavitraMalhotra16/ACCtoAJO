@@ -70,14 +70,6 @@ export default function ConfigPage() {
               View ACC Schemas
             </button>
           )}
-          {accConnected && (
-            <button
-              onClick={() => navigate('/inspect')}
-              className="px-6 py-2.5 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-100 font-medium transition-colors"
-            >
-              Schema Inspector
-            </button>
-          )}
           <button
             onClick={handleMigrate}
             disabled={!accConnected || !ajoConnected || migrating}
