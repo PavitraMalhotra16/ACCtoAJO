@@ -77,7 +77,7 @@ async def _run_conversion_job(job_id: str, schemas: list[SchemaRef], acc_conn, l
                     raise ValueError(f"SOAP fault: {fault}")
 
                 # Convert XML → JSON
-                parsed = parse_schema_to_xdm(resp.text, s.namespace, s.name)
+                parsed = parse_schema_to_xdm(resp.text, s.name)
                 if not parsed:
                     raise ValueError("Could not parse schema XML")
 
@@ -86,7 +86,6 @@ async def _run_conversion_job(job_id: str, schemas: list[SchemaRef], acc_conn, l
                         job_id=job_id,
                         login_id=login_id,
                         schema_name=key,
-                        namespace=s.namespace,
                         raw_json=json.dumps(parsed),
                     ))
                     await db_session.commit()
