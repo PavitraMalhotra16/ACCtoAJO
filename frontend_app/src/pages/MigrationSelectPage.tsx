@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getSchemas } from '../api/client'
-// startConversion removed — page is no longer routed; kept for reference only
+import { startConversion } from '../api/migration'
 
 interface SchemaEntry { namespace: string; name: string; label: string }
 
@@ -51,12 +51,17 @@ export default function MigrationSelectPage() {
   }
 
   async function handleNext() {
-    // This page is no longer actively routed; kept as reference only
     const chosen = schemas.filter(s => selected.has(key(s)))
     if (!chosen.length) return
     setStarting(true)
-    setError('This page is no longer in use. Please use the Migrate button on the home page.')
-    setStarting(false)
+    setError(null)
+    try {
+      const data = await startConversion(chosen)
+      navigate(`/migration/run?extract_job=${data.job_id}`)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to start conversion')
+      setStarting(false)
+    }
   }
 
   return (
@@ -84,7 +89,7 @@ export default function MigrationSelectPage() {
               </svg>
               Starting…
             </>
-          ) : 'Next →'}
+          ) : 'Migrate →'}
         </button>
       </div>
 
@@ -140,11 +145,8 @@ export default function MigrationSelectPage() {
                     className="mt-0.5 rounded"
                   />
                   <div className="min-w-0">
-                    <div className="text-xs font-mono text-blue-700 truncate">{s.name}</div>
-                    <div className="flex items-center gap-2 mt-0.5">
-                      <span className="text-xs bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded shrink-0">{s.namespace}</span>
-                      {s.label && <span className="text-xs text-gray-500 truncate">{s.label}</span>}
-                    </div>
+                    <div className="text-xs font-mono text-blue-700 truncate">{s.namespace}:{s.name}</div>
+                    {s.label && <div className="text-xs text-gray-500 truncate mt-0.5">{s.label}</div>}
                   </div>
                 </div>
               )
@@ -164,13 +166,13 @@ export default function MigrationSelectPage() {
                   d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
               </svg>
               <p className="text-sm">Select one or more schemas from the list</p>
-              <p className="text-xs mt-1">then click <strong>Next →</strong> to convert them</p>
+              <p className="text-xs mt-1">then click <strong>Migrate →</strong> to start</p>
             </div>
           ) : (
             <div className="text-gray-600">
               <div className="text-4xl font-bold text-blue-600 mb-2">{selected.size}</div>
               <p className="text-sm">schema{selected.size !== 1 ? 's' : ''} selected</p>
-              <p className="text-xs text-gray-400 mt-2">Click <strong>Next →</strong> to convert to JSON</p>
+              <p className="text-xs text-gray-400 mt-2">Click <strong>Migrate →</strong> in the header to start</p>
               <div className="mt-4 text-left bg-white border border-gray-200 rounded-xl p-4 max-h-64 overflow-y-auto">
                 {[...selected].map(k => (
                   <div key={k} className="text-xs font-mono text-blue-700 py-0.5">{k}</div>

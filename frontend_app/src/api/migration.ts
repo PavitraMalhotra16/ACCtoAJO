@@ -49,6 +49,24 @@ async function _safeError(res: Response, fallback: string): Promise<never> {
   }
 }
 
+export async function startConversion(
+  schemas: { namespace: string; name: string; label?: string }[]
+): Promise<{ job_id: string }> {
+  let res: Response
+  try {
+    res = await fetch('/api/convert/start', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ schemas }),
+    })
+  } catch {
+    throw new Error('Backend server is not running — please start it first')
+  }
+  if (!res.ok) await _safeError(res, 'Failed to start conversion')
+  return res.json()
+}
+
 export async function startExtraction(): Promise<{ job_id: string | null; message: string; total: number; skipped: number }> {
   let res: Response
   try {

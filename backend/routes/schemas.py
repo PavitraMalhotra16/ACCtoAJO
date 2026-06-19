@@ -54,7 +54,9 @@ async def list_schemas(
             },
         )
 
-    schemas = parse_schemas(resp.text)
+    EXCLUDED = {"crm", "ncm", "nms", "xtk", "nl"}
+    all_schemas = parse_schemas(resp.text)
+    schemas = [s for s in all_schemas if s.get("namespace", "").lower() not in EXCLUDED]
     if not schemas:
         log.warning("No schemas parsed – raw: %s", resp.text[:500])
     return {"schemas": schemas}
