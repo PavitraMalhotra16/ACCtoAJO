@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
-from db import UserSession, SchemaJobItem, init_db, AsyncSessionLocal
+from db import UserSession, SchemaJobItem, init_db, AsyncSessionLocal, ensure_schema_columns
 from config import settings
 from routes.auth import router as auth_router
 from routes.schemas import router as schemas_router
@@ -23,6 +23,7 @@ log = logging.getLogger("acc_backend")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await ensure_schema_columns()
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(UserSession).where(UserSession.expires_at < datetime.now(timezone.utc))
