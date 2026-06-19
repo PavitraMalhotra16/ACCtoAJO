@@ -54,9 +54,16 @@ async def list_schemas(
             },
         )
 
-    EXCLUDED = {"crm", "ncm", "nms", "xtk", "nl"}
+    # All namespaces that ship with Adobe Campaign Classic out of the box.
+    # Anything not in this set is a customer-created custom schema.
+    SYSTEM_NAMESPACES = {
+        "xtk", "nms", "nl", "ncm", "crm",   # core platform
+        "bur", "sfa", "ext", "offer", "mkt", # modules
+        "wpa", "sup", "temp", "ghost",        # misc system
+        "nav", "acs", "fda",                  # connectors / FDA
+    }
     all_schemas = parse_schemas(resp.text)
-    schemas = [s for s in all_schemas if s.get("namespace", "").lower() not in EXCLUDED]
+    schemas = [s for s in all_schemas if s.get("namespace", "").lower() not in SYSTEM_NAMESPACES]
     if not schemas:
         log.warning("No schemas parsed – raw: %s", resp.text[:500])
     return {"schemas": schemas}
