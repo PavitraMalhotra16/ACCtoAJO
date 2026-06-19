@@ -4,8 +4,9 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.exc import ProgrammingError
 
-from db import AsyncSessionLocal, ConvertedSchema, DestinationConnection
+from db import AsyncSessionLocal, ConvertedSchema, DestinationConnection, ensure_schema_columns
 from core.security import decrypt, encrypt
 
 IMS_TOKEN_URL = "https://ims-na1.adobelogin.com/ims/token/v3"
@@ -421,19 +422,28 @@ def _derive_tenant_id(org_id: str) -> str:
 
 
 async def fetch_tenant_id(ctx: dict, data: dict) -> dict:
-    """Read tenant ID from DestinationConnection — set once at AJO connect time."""
+    """Read tenant ID from DestinationConnection. Auto-repairs missing column once if needed."""
     org_id = ctx["org_id"]
 
-    async with AsyncSessionLocal() as db:
-        dest_result = await db.execute(
-            select(DestinationConnection).where(DestinationConnection.org_id == org_id)
-        )
-        dest = dest_result.scalar_one_or_none()
+    async def _query_tenant_id() -> str | None:
+        async with AsyncSessionLocal() as db:
+            dest_result = await db.execute(
+                select(DestinationConnection).where(DestinationConnection.org_id == org_id)
+            )
+            dest = dest_result.scalar_one_or_none()
+        return dest.tenant_id if dest and dest.tenant_id else None
 
-    if dest and dest.tenant_id:
-        tenant_id = dest.tenant_id
-    else:
-        # Fallback: derive from org_id if not yet stored (old connections pre-migration)
+    try:
+        tenant_id = await _query_tenant_id()
+    except ProgrammingError as exc:
+        if "column" in str(exc).lower():
+            log.warning("Missing DB column detected in fetch_tenant_id — running ensure_schema_columns")
+            await ensure_schema_columns()
+            tenant_id = await _query_tenant_id()
+        else:
+            raise
+
+    if not tenant_id:
         tenant_id = _derive_tenant_id(org_id)
         log.warning("tenant_id not on DestinationConnection for %s — derived as %s", org_id, tenant_id)
 
