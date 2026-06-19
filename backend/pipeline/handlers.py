@@ -94,19 +94,25 @@ def _infer_behavior(source_name: str, root_name: str) -> str:
 
 # Rule 3: well-known field names → standard AEP identity namespaces
 _NAME_TO_NAMESPACE: dict[str, str] = {
-    "email":       "Email",
+    "email":        "Email",
     "emailaddress": "Email",
-    "externid":    "ECID",
-    "externalid":  "ECID",
-    "ecid":        "ECID",
-    "customerid":  "CustomerID",
-    "userid":      "UserID",
-    "phonenumber": "Phone",
-    "phone":       "Phone",
+    "externid":     "ECID",
+    "externalid":   "ECID",
+    "ecid":         "ECID",
+    "customerid":   "CustomerID",
+    "userid":       "UserID",
+    "phonenumber":  "Phone",
+    "phone":        "Phone",
     "mobilenumber": "Phone",
 }
 
-_RULE3_NAMES = {"email", "emailaddress", "externalid", "externid", "ecid", "customerid", "userid", "phonenumber", "phone", "mobilenumber"}
+# Business anchor fields → isPrimary=true (stable, always-present business identifiers)
+_RULE3_PRIMARY = {"customerid", "userid"}
+
+# Stitching/secondary fields → isPrimary=false (useful for lookup but not the record anchor)
+_RULE3_SECONDARY = {"email", "emailaddress", "externid", "externalid", "ecid", "phonenumber", "phone", "mobilenumber"}
+
+_RULE3_NAMES = _RULE3_PRIMARY | _RULE3_SECONDARY
 
 
 def _auto_map_namespace(field_name: str) -> str | None:
@@ -242,14 +248,18 @@ async def resolve_identity(ctx: dict, data: dict) -> dict:
         if name in _RULE3_NAMES:
             original_name = attr["name"]
             namespace = _auto_map_namespace(original_name)
+            is_primary = name in _RULE3_PRIMARY
             data["identityDecision"] = {
                 "status": "resolved",
                 "fieldPath": f"/{original_name}",
-                "isPrimary": True,
+                "isPrimary": is_primary,
                 "namespace": namespace,
-                "reason": f"Field name {original_name!r} matched known identity pattern — auto-mapped to {namespace}",
+                "reason": (
+                    f"Field name {original_name!r} matched known identity pattern — "
+                    f"auto-mapped to {namespace} ({'primary anchor' if is_primary else 'secondary/stitching identity'})"
+                ),
             }
-            log.info("Rule 3 identity match: %s → namespace %s", original_name, namespace)
+            log.info("Rule 3 identity match: %s → namespace %s, isPrimary=%s", original_name, namespace, is_primary)
             return data
 
     # No identity found — warn, do not silently default
@@ -342,8 +352,6 @@ async def make_enriched_json(ctx: dict, data: dict) -> dict:
 
     field_path = identity.get("fieldPath")
     primary_key = field_path.lstrip("/") if field_path else None
-    # Use the namespace already resolved by Rule 3 if present, else derive from field name
-    identity_namespace = identity.get("namespace") or (_derive_namespace(primary_key) if primary_key else None)
 
     version_field = _find_version_field(attributes)
     timestamp_field = _find_timestamp_field(attributes) if behavior == "time-series" else None
@@ -353,8 +361,6 @@ async def make_enriched_json(ctx: dict, data: dict) -> dict:
         "description": schema_meta.get("description") or "",
         "behavior": behavior,
         "primaryKey": primary_key,
-        "identityNamespace": identity_namespace,
-        "identityUnresolved": identity.get("status") == "unresolved",
         "fields": _build_fields(attributes, xdm_types),
         "relationships": _build_relationships(links_and_joins),
     }
@@ -704,7 +710,10 @@ async def ensure_namespace(ctx: dict, data: dict) -> dict:
     input_json = await _get_input_json(ctx, data)
     decision = data.get("identityDecision") or {}
     is_primary = decision.get("isPrimary")
-    namespace = input_json.get("identityNamespace")
+    primary_key = input_json.get("primaryKey")
+
+    # Resolve namespace dynamically: Rule 3 match takes priority, else derive from field name
+    namespace = decision.get("namespace") or (_derive_namespace(primary_key) if primary_key else None)
 
     # No business key at all → nothing to register
     if is_primary is None or not namespace:
@@ -761,7 +770,7 @@ async def call_identity_descriptor(ctx: dict, data: dict) -> dict:
     schema_id = data.get("schemaId")
     decision = data.get("identityDecision") or {}
     is_primary = bool(decision.get("isPrimary"))
-    namespace = data.get("namespaceCode") or input_json.get("identityNamespace")
+    namespace = data.get("namespaceCode")
     primary_key = input_json.get("primaryKey")
 
     if not (tenant_id and schema_id and namespace and primary_key):
