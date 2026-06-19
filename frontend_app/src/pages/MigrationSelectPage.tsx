@@ -5,6 +5,8 @@ import { startConversion } from '../api/migration'
 
 interface SchemaEntry { namespace: string; name: string; label: string }
 
+const EXCLUDED_NAMESPACES = new Set(['crm', 'ncm', 'nms', 'xtk', 'nl'])
+
 export default function MigrationSelectPage() {
   const navigate = useNavigate()
 
@@ -18,7 +20,9 @@ export default function MigrationSelectPage() {
 
   useEffect(() => {
     getSchemas()
-      .then(d => setSchemas(d.schemas ?? []))
+      .then(d => setSchemas(
+        (d.schemas ?? []).filter(s => !EXCLUDED_NAMESPACES.has(s.namespace.toLowerCase()))
+      ))
       .catch(e => setError(`Failed to load schemas: ${e.message}`))
       .finally(() => setLoading(false))
   }, [])

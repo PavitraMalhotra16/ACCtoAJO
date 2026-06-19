@@ -8,27 +8,11 @@ import { getAccStatus, getAjoStatus } from '../api/client'
 export default function ConfigPage() {
   const navigate = useNavigate()
   const { accConnected, ajoConnected, setAccConnected, setAccDisconnected, setAjoConnected } = useConfigStore()
-  const [migrating, setMigrating] = useState(false)
   const [migrateError, setMigrateError] = useState<string | null>(null)
 
-  async function handleMigrate() {
-    setMigrating(true); setMigrateError(null)
-    try {
-      const res = await fetch('/api/convert/start-all', {
-        method: 'POST', credentials: 'include',
-      })
-      if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Failed') }
-      const data = await res.json()
-      if (data.message === 'all_done') {
-        setMigrateError(`All ${data.total} schemas are already converted. Nothing left to migrate.`)
-        setMigrating(false)
-        return
-      }
-      navigate(`/migration/run?job=${data.job_id}`)
-    } catch (e: unknown) {
-      setMigrateError(e instanceof Error ? e.message : 'Failed to start migration')
-      setMigrating(false)
-    }
+  function handleMigrate() {
+    setMigrateError(null)
+    navigate('/migration')
   }
 
   useEffect(() => {
@@ -72,18 +56,10 @@ export default function ConfigPage() {
           )}
           <button
             onClick={handleMigrate}
-            disabled={!accConnected || !ajoConnected || migrating}
-            className="px-6 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white font-medium transition-colors flex items-center gap-2"
+            disabled={!accConnected || !ajoConnected}
+            className="px-6 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white font-medium transition-colors"
           >
-            {migrating ? (
-              <>
-                <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-                </svg>
-                Starting…
-              </>
-            ) : 'Migrate'}
+            Migrate
           </button>
           {migrateError && (
             <p className={`text-sm ${migrateError.includes('already converted') ? 'text-green-600' : 'text-red-600'}`}>
