@@ -37,9 +37,26 @@ export interface ExtractionJob {
   steps: ExtractionStep[]
 }
 
+async function _safeError(res: Response, fallback: string): Promise<never> {
+  try {
+    const e = await res.json()
+    throw new Error(e.detail || fallback)
+  } catch {
+    if (res.status === 502 || res.status === 503 || res.status === 504 || res.status === 500) {
+      throw new Error('Backend server is not running — please start it first')
+    }
+    throw new Error(fallback)
+  }
+}
+
 export async function startExtraction(): Promise<{ job_id: string | null; message: string; total: number; skipped: number }> {
-  const res = await fetch('/api/convert/start-all', { method: 'POST', credentials: 'include' })
-  if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Failed to start extraction') }
+  let res: Response
+  try {
+    res = await fetch('/api/convert/start-all', { method: 'POST', credentials: 'include' })
+  } catch {
+    throw new Error('Backend server is not running — please start it first')
+  }
+  if (!res.ok) await _safeError(res, 'Failed to start extraction')
   return res.json()
 }
 
@@ -50,8 +67,13 @@ export async function getExtractionStatus(jobId: string): Promise<ExtractionJob>
 }
 
 export async function startMigration(): Promise<{ job_id: string; message: string; total: number; queued: number; skipped: number }> {
-  const res = await fetch('/api/migrate/start', { method: 'POST', credentials: 'include' })
-  if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Failed to start migration') }
+  let res: Response
+  try {
+    res = await fetch('/api/migrate/start', { method: 'POST', credentials: 'include' })
+  } catch {
+    throw new Error('Backend server is not running — please start it first')
+  }
+  if (!res.ok) await _safeError(res, 'Failed to start migration')
   return res.json()
 }
 

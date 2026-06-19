@@ -1,16 +1,30 @@
 const BASE = ''
 
-export async function accConnect(payload: Record<string, string>) {
-  const res = await fetch(`${BASE}/api/acc/connect`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify(payload),
-  })
-  if (!res.ok) {
-    const err = await res.json()
-    throw new Error(err.detail || 'Connection failed')
+async function _safeError(res: Response, fallback: string): Promise<never> {
+  if (res.status === 500 || res.status === 502 || res.status === 503 || res.status === 504) {
+    throw new Error('Backend server is not running — please start it first')
   }
+  try {
+    const err = await res.json()
+    throw new Error(err.detail || fallback)
+  } catch {
+    throw new Error(fallback)
+  }
+}
+
+export async function accConnect(payload: Record<string, string>) {
+  let res: Response
+  try {
+    res = await fetch(`${BASE}/api/acc/connect`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(payload),
+    })
+  } catch {
+    throw new Error('Backend server is not running — please start it first')
+  }
+  if (!res.ok) await _safeError(res, 'Connection failed')
   return res.json()
 }
 
@@ -19,16 +33,18 @@ export async function accDisconnect() {
 }
 
 export async function ajoConnect(orgId: string, clientId: string, clientSecret: string, sandboxName: string) {
-  const res = await fetch(`${BASE}/api/ajo/connect`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify({ org_id: orgId, client_id: clientId, client_secret: clientSecret, sandbox_name: sandboxName }),
-  })
-  if (!res.ok) {
-    const err = await res.json()
-    throw new Error(err.detail || 'Connection failed')
+  let res: Response
+  try {
+    res = await fetch(`${BASE}/api/ajo/connect`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ org_id: orgId, client_id: clientId, client_secret: clientSecret, sandbox_name: sandboxName }),
+    })
+  } catch {
+    throw new Error('Backend server is not running — please start it first')
   }
+  if (!res.ok) await _safeError(res, 'Connection failed')
   return res.json()
 }
 
