@@ -2,11 +2,12 @@
 PostgreSQL setup — only tables used by the active migration tool.
 """
 
+import logging
 import os
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -100,6 +101,49 @@ class TenantConfig(Base):
     # JSON array of {code, name, id, idType} from AEP Identity Namespace API
     namespaces_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+log = logging.getLogger("acc_backend.db")
+
+_MANAGED_TABLES = {"source_connections", "destination_connections"}
+
+
+async def ensure_schema_columns() -> None:
+    """
+    Compare ORM model columns against the live DB for managed tables.
+    Issues ALTER TABLE ... ADD COLUMN IF NOT EXISTS for any missing non-PK columns.
+    Safe to call multiple times (IF NOT EXISTS is idempotent).
+    """
+    async with engine.connect() as conn:
+        for mapper in Base.registry.mappers:
+            table = mapper.class_.__table__
+            if table.name not in _MANAGED_TABLES:
+                continue
+
+            result = await conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = :tname"
+                ),
+                {"tname": table.name},
+            )
+            existing = {row[0] for row in result.fetchall()}
+
+            for col in table.columns:
+                if col.primary_key or col.name in existing:
+                    continue
+                col_type = col.type.compile(dialect=conn.dialect)
+                await conn.execute(
+                    text(
+                        f'ALTER TABLE "{table.name}" '
+                        f'ADD COLUMN IF NOT EXISTS "{col.name}" {col_type}'
+                    )
+                )
+                log.warning(
+                    "Added missing column %r to table %r", col.name, table.name
+                )
+
+        await conn.commit()
 
 
 async def get_db():
