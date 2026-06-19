@@ -51,6 +51,7 @@ function SchemaDetailCard({
 
   return (
     <div className="border border-gray-200 rounded-xl bg-white overflow-hidden">
+      {/* Header row */}
       <button
         onClick={onToggle}
         className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors text-left"
@@ -80,12 +81,14 @@ function SchemaDetailCard({
         )}
       </button>
 
+      {/* Expanded body */}
       {expanded && (
         <div className="border-t border-gray-100 px-4 py-3">
           {loading && <p className="text-xs text-gray-400 py-2">Loading schema details…</p>}
           {!loading && !detail && <p className="text-xs text-red-400 py-2">Failed to load details</p>}
           {!loading && detail && (
             <>
+              {/* Primary key badge */}
               {pkInfo && pkInfo.field && (
                 <div className="mb-3 flex items-center gap-2">
                   <span className="text-xs font-medium text-purple-700 bg-purple-50 border border-purple-200 rounded px-2 py-0.5">
@@ -95,6 +98,7 @@ function SchemaDetailCard({
                 </div>
               )}
 
+              {/* Attributes table */}
               {attrs.length > 0 ? (
                 <div className="overflow-x-auto">
                   <table className="w-full text-xs">
@@ -149,9 +153,10 @@ export default function MigrationSelectPage() {
   const [search, setSearch]     = useState('')
   const [starting, setStarting] = useState(false)
 
-  const [details, setDetails]       = useState<Record<string, SchemaDetail | null>>({})
+  // Details cache: key → SchemaDetail | null (null = failed)
+  const [details, setDetails]   = useState<Record<string, SchemaDetail | null>>({})
   const [loadingDetail, setLoadingDetail] = useState<Set<string>>(new Set())
-  const [expanded, setExpanded]     = useState<Set<string>>(new Set())
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     getSchemas()
@@ -186,9 +191,11 @@ export default function MigrationSelectPage() {
       const next = new Set(prev)
       if (next.has(k)) {
         next.delete(k)
+        // collapse when deselected
         setExpanded(e => { const ne = new Set(e); ne.delete(k); return ne })
       } else {
         next.add(k)
+        // auto-expand and fetch when selected
         setExpanded(e => new Set(e).add(k))
         fetchDetail(s)
       }
@@ -227,7 +234,7 @@ export default function MigrationSelectPage() {
     })
   }
 
-  async function handleMigrate() {
+  async function handleNext() {
     const chosen = schemas.filter(s => selected.has(key(s)))
     if (!chosen.length) return
     setStarting(true)
@@ -256,7 +263,7 @@ export default function MigrationSelectPage() {
           </span>
         )}
         <button
-          onClick={handleMigrate}
+          onClick={handleNext}
           disabled={selected.size === 0 || starting || loading}
           className="px-5 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white text-sm font-semibold rounded-lg transition-colors flex items-center gap-2"
         >

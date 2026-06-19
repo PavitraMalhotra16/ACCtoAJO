@@ -10,6 +10,7 @@ export default function ConfigPage() {
   const navigate = useNavigate()
   const { accConnected, ajoConnected, setAccConnected, setAccDisconnected, setAjoConnected } = useConfigStore()
 
+
   useEffect(() => {
     getAccStatus().then(s => {
       if (s.connected && s.login) setAccConnected(s.login)
@@ -31,6 +32,10 @@ export default function ConfigPage() {
     }).catch(() => {/* not authenticated yet, ignore */})
   }, [])
 
+  function handleMigrate() {
+    navigate('/migration/select')
+  }
+
   return (
     <div className="min-h-screen flex flex-col items-center justify-center px-4 py-12">
       <div className="w-full max-w-5xl flex flex-col gap-8">
@@ -46,7 +51,7 @@ export default function ConfigPage() {
 
         <div className="flex flex-col items-center gap-3">
           <button
-            onClick={() => navigate('/migration/select')}
+            onClick={handleMigrate}
             disabled={!accConnected || !ajoConnected}
             className="px-8 py-3 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white font-semibold text-base transition-colors"
           >
@@ -62,6 +67,7 @@ export default function ConfigPage() {
           {!accConnected && ajoConnected && (
             <p className="text-xs text-gray-400">Connect ACC to enable migration</p>
           )}
+
         </div>
       </div>
     </div>
