@@ -1,16 +1,14 @@
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import AccPanel from '../components/AccPanel'
 import AjoPanel from '../components/AjoPanel'
 import { useConfigStore } from '../store/configStore'
 import { getAccStatus, getAjoStatus } from '../api/client'
-import { listMigrationJobs, getMigrationStatus, startExtraction } from '../api/migration'
+import { listMigrationJobs, getMigrationStatus } from '../api/migration'
 
 export default function ConfigPage() {
   const navigate = useNavigate()
   const { accConnected, ajoConnected, setAccConnected, setAccDisconnected, setAjoConnected } = useConfigStore()
-  const [migrating, setMigrating] = useState(false)
-  const [migrateError, setMigrateError] = useState<string | null>(null)
 
   useEffect(() => {
     getAccStatus().then(s => {
@@ -33,24 +31,6 @@ export default function ConfigPage() {
     }).catch(() => {/* not authenticated yet, ignore */})
   }, [])
 
-  async function handleMigrate() {
-    setMigrating(true)
-    setMigrateError(null)
-    try {
-      const data = await startExtraction()
-      if (data.message === 'all_done') {
-        // Already extracted — skip straight to AJO migration
-        navigate('/migration/run?phase=migrate')
-        return
-      }
-      navigate(`/migration/run?extract_job=${data.job_id}`)
-    } catch (e: unknown) {
-      setMigrateError(e instanceof Error ? e.message : 'Failed to start migration')
-    } finally {
-      setMigrating(false)
-    }
-  }
-
   return (
     <div className="min-h-screen flex flex-col items-center justify-center px-4 py-12">
       <div className="w-full max-w-5xl flex flex-col gap-8">
@@ -66,19 +46,11 @@ export default function ConfigPage() {
 
         <div className="flex flex-col items-center gap-3">
           <button
-            onClick={handleMigrate}
-            disabled={!accConnected || !ajoConnected || migrating}
-            className="px-8 py-3 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white font-semibold text-base transition-colors flex items-center gap-2"
+            onClick={() => navigate('/migration/select')}
+            disabled={!accConnected || !ajoConnected}
+            className="px-8 py-3 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white font-semibold text-base transition-colors"
           >
-            {migrating ? (
-              <>
-                <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-                </svg>
-                Starting…
-              </>
-            ) : 'Migrate →'}
+            Migrate →
           </button>
 
           {!accConnected && !ajoConnected && (
@@ -89,12 +61,6 @@ export default function ConfigPage() {
           )}
           {!accConnected && ajoConnected && (
             <p className="text-xs text-gray-400">Connect ACC to enable migration</p>
-          )}
-
-          {migrateError && (
-            <p className={`text-sm ${migrateError.includes('already migrated') ? 'text-green-600' : 'text-red-600'}`}>
-              {migrateError}
-            </p>
           )}
         </div>
       </div>

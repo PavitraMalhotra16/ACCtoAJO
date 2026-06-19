@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import ConfigPage from './pages/ConfigPage'
+import MigrationSelectPage from './pages/MigrationSelectPage'
 import MigrationRunPage from './pages/MigrationRunPage'
 import { useConfigStore } from './store/configStore'
 
@@ -13,6 +14,11 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<ConfigPage />} />
+        <Route path="/migration/select" element={
+          <ProtectedRoute condition={accConnected && ajoConnected}>
+            <MigrationSelectPage />
+          </ProtectedRoute>
+        } />
         <Route path="/migration/run" element={
           <ProtectedRoute condition={accConnected && ajoConnected}>
             <MigrationRunPage />

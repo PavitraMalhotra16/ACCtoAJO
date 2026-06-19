@@ -37,6 +37,34 @@ export interface ExtractionJob {
   steps: ExtractionStep[]
 }
 
+async function _safeError(res: Response, fallback: string): Promise<never> {
+  try {
+    const e = await res.json()
+    throw new Error(e.detail || fallback)
+  } catch {
+    if (res.status >= 500) throw new Error('Backend server is not running — please start it first')
+    throw new Error(fallback)
+  }
+}
+
+export async function startConversion(
+  schemas: { namespace: string; name: string; label?: string }[]
+): Promise<{ job_id: string }> {
+  let res: Response
+  try {
+    res = await fetch('/api/convert/start', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ schemas }),
+    })
+  } catch {
+    throw new Error('Backend server is not running — please start it first')
+  }
+  if (!res.ok) await _safeError(res, 'Failed to start conversion')
+  return res.json()
+}
+
 export async function startExtraction(): Promise<{ job_id: string | null; message: string; total: number; skipped: number }> {
   const res = await fetch('/api/convert/start-all', { method: 'POST', credentials: 'include' })
   if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Failed to start extraction') }
