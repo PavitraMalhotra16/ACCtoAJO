@@ -321,29 +321,41 @@ export default function MigrationSelectPage() {
             {filtered.map(s => {
               const k = key(s)
               const checked = selected.has(k)
-              const alreadyMigrated = extracted.has(k)
+              const alreadyExtracted = extracted.has(k)
               return (
                 <div
                   key={k}
-                  className={`flex items-start gap-3 px-4 py-3 border-b border-gray-100 cursor-pointer transition-colors ${
-                    checked ? 'bg-blue-50 border-l-2 border-l-blue-500' : 'hover:bg-gray-50'
+                  className={`flex items-start gap-3 px-4 py-3 border-b border-gray-100 transition-colors ${
+                    alreadyExtracted
+                      ? 'bg-gray-50 cursor-default opacity-70'
+                      : checked
+                        ? 'bg-blue-50 border-l-2 border-l-blue-500 cursor-pointer'
+                        : 'hover:bg-gray-50 cursor-pointer'
                   }`}
-                  onClick={() => toggle(s)}
+                  onClick={() => { if (!alreadyExtracted) toggle(s) }}
                 >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => toggle(s)}
-                    onClick={e => e.stopPropagation()}
-                    className="mt-0.5 rounded"
-                  />
+                  {alreadyExtracted ? (
+                    <svg className="mt-0.5 w-4 h-4 text-green-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/>
+                    </svg>
+                  ) : (
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggle(s)}
+                      onClick={e => e.stopPropagation()}
+                      className="mt-0.5 rounded"
+                    />
+                  )}
                   <div className="min-w-0 flex-1">
-                    <div className="text-xs font-mono text-blue-700 truncate">{s.namespace}:{s.name}</div>
+                    <div className={`text-xs font-mono truncate ${alreadyExtracted ? 'text-gray-500' : 'text-blue-700'}`}>
+                      {s.namespace}:{s.name}
+                    </div>
                     <div className="flex items-center gap-2 mt-0.5">
-                      {s.label && <span className="text-xs text-gray-500 truncate">{s.label}</span>}
-                      {alreadyMigrated && (
+                      {s.label && <span className="text-xs text-gray-400 truncate">{s.label}</span>}
+                      {alreadyExtracted && (
                         <span className="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-700 font-medium shrink-0">
-                          Already migrated
+                          Extracted — enriched JSON ready
                         </span>
                       )}
                     </div>

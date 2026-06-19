@@ -9,6 +9,8 @@ class PipelineStep:
     order: int
 
 
+# Phase 2 (migrationpart) — extraction pipeline only, steps 1-5.
+# Steps 6+ (AEP schema/identity descriptor API calls) belong to Phase 3 (AJOpart).
 PIPELINE_STEPS: list[PipelineStep] = [
     PipelineStep(
         name="LOAD_JSON",
@@ -36,26 +38,8 @@ PIPELINE_STEPS: list[PipelineStep] = [
     ),
     PipelineStep(
         name="BUILD_PAYLOAD",
-        label="Assemble AJO schema payload",
+        label="Assemble enriched JSON payload",
         handler="pipeline.handlers.build_payload",
         order=5,
-    ),
-    PipelineStep(
-        name="CALL_SCHEMA_API",
-        label="POST schema to AEP Schema Registry",
-        handler="pipeline.handlers.call_schema_api_stub",
-        order=6,
-    ),
-    PipelineStep(
-        name="CALL_IDENTITY_DESCRIPTOR_API",
-        label="POST identity descriptor to AEP",
-        handler="pipeline.handlers.call_identity_descriptor_stub",
-        order=7,
-    ),
-    PipelineStep(
-        name="VERIFY",
-        label="GET schema back from AEP to confirm live",
-        handler="pipeline.handlers.verify_stub",
-        order=8,
     ),
 ]

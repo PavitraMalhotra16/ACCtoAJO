@@ -10,18 +10,15 @@ import {
   type MigrationSchemaItem,
 } from '../api/migration'
 
-// Labels must match pipeline_steps.py
+// Labels must match pipeline_steps.py — Phase 2 runs steps 1-5 only
 const STEP_LABELS: Record<string, string> = {
   LOAD_JSON: 'Loading schema',
   MAP_TYPES: 'Mapping types',
   RESOLVE_IDENTITY: 'Resolving identity',
   FETCH_TENANT_ID: 'Fetching tenant ID',
-  BUILD_PAYLOAD: 'Building payload',
-  CALL_SCHEMA_API: 'Creating schema in AEP',
-  CALL_IDENTITY_DESCRIPTOR_API: 'Registering identity',
-  VERIFY: 'Verifying',
+  BUILD_PAYLOAD: 'Building enriched JSON',
 }
-const TOTAL_STEPS = 8
+const TOTAL_STEPS = 5
 
 type Phase = 'extracting' | 'migrating' | 'done'
 
@@ -161,7 +158,7 @@ function MigrationDashboard({ job, startedAt }: { job: MigrationJob; startedAt: 
     <div className="flex flex-col gap-6">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Schema migration</h1>
+        <h1 className="text-2xl font-bold text-gray-900">Schema extraction</h1>
         <p className="text-sm text-gray-400 mt-1">
           {startedAt && `Job started ${timeAgo(startedAt)} · `}
           {job.total} schemas
@@ -173,7 +170,7 @@ function MigrationDashboard({ job, startedAt }: { job: MigrationJob; startedAt: 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {[
           { label: 'Total', value: job.total, color: 'text-gray-900' },
-          { label: 'Completed', value: job.completed, color: 'text-green-600' },
+          { label: 'Extracted', value: job.completed, color: 'text-green-600' },
           { label: 'In progress', value: job.running, color: 'text-blue-600' },
           { label: 'Failed', value: job.failed, color: 'text-red-600' },
         ].map(card => (
@@ -227,7 +224,7 @@ function MigrationDashboard({ job, startedAt }: { job: MigrationJob; startedAt: 
       {/* All done */}
       {allDone && failed.length === 0 && (
         <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-center text-green-700 font-medium text-sm">
-          All {job.completed} schemas migrated successfully
+          All {job.completed} schemas extracted — enriched JSON ready
         </div>
       )}
     </div>
@@ -242,7 +239,7 @@ function ExtractionLoadingView({ job }: { job: ExtractionJob | null }) {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Schema migration</h1>
+        <h1 className="text-2xl font-bold text-gray-900">Schema extraction</h1>
         <p className="text-sm text-gray-400 mt-1">Extracting schemas from ACC…</p>
       </div>
       <div className="bg-white border border-gray-200 rounded-xl p-5 flex flex-col gap-3">
