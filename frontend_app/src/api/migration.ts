@@ -110,21 +110,6 @@ export async function startMigration(extractJobId?: string): Promise<{ job_id: s
   return res.json()
 }
 
-export async function startMigrationDirect(): Promise<{ job_id: string; message: string; total: number; queued: number; skipped: number }> {
-  let res: Response
-  try {
-    res = await fetch('/api/migrate/start', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ extract_job_id: null }),
-    })
-  } catch {
-    throw new Error('Backend server is not running — please start it first')
-  }
-  if (!res.ok) await _safeError(res, 'Failed to start migration')
-  return res.json()
-}
 
 export interface IncompleteSchema {
   schema_name: string

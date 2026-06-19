@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getSchemas, getSchemaDetail } from '../api/client'
-import { startConversion, getExtractedSchemas, getIncompleteSchemas, startMigrationDirect, type IncompleteSchema } from '../api/migration'
+import { startConversion, startMigration, getExtractedSchemas, getIncompleteSchemas, type IncompleteSchema } from '../api/migration'
 
 interface SchemaEntry { namespace: string; name: string; label: string }
 
@@ -264,7 +264,7 @@ export default function MigrationSelectPage() {
       // retries, not new selections), skip re-extraction and go straight to migration.
       const allAlreadyExtracted = chosen.every(s => extracted.has(key(s)))
       if (allAlreadyExtracted) {
-        const data = await startMigrationDirect()
+        const data = await startMigration()
         if (data.message === 'all_done') {
           setError('All selected schemas are already fully migrated.')
           setStarting(false)
@@ -299,6 +299,11 @@ export default function MigrationSelectPage() {
         {selected.size > 0 && (
           <span className="text-sm font-medium text-blue-600 bg-blue-50 px-3 py-1 rounded-full">
             {selected.size} selected
+          </span>
+        )}
+        {Object.values(incomplete).some(s => s.status === 'FAILED') && (
+          <span className="text-xs text-amber-600 bg-amber-50 border border-amber-200 px-3 py-1 rounded-full">
+            Failed schemas will all be retried
           </span>
         )}
         <button
@@ -352,10 +357,9 @@ export default function MigrationSelectPage() {
             {error && <p className="text-sm text-red-500 p-4">{error}</p>}
             {filtered.map(s => {
               const k = key(s)
-              const schemaKey = `${s.namespace}:${s.name}`
               const checked = selected.has(k)
-              const alreadyExtracted = extracted.has(schemaKey)
-              const inProgress = incomplete[schemaKey]
+              const alreadyExtracted = extracted.has(k)
+              const inProgress = incomplete[k]
               const isFailed = inProgress?.status === 'FAILED'
 
               // FAILED pipeline status takes priority over extracted badge.

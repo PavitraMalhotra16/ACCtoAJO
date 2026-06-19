@@ -23,7 +23,10 @@ log = logging.getLogger("acc_backend")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    await ensure_schema_columns()
+    try:
+        await ensure_schema_columns()
+    except Exception:
+        log.warning("ensure_schema_columns failed at startup — DB may have missing columns; will retry lazily at runtime")
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(UserSession).where(UserSession.expires_at < datetime.now(timezone.utc))
