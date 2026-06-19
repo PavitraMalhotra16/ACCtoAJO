@@ -90,7 +90,37 @@ def _infer_behavior(source_name: str, root_name: str) -> str:
     return "time-series" if any(kw in combined for kw in _TIME_SERIES_KEYWORDS) else "record"
 
 
+# Rule 3: well-known field names → standard AEP identity namespaces
+_NAME_TO_NAMESPACE: dict[str, str] = {
+    "email":        "Email",
+    "emailaddress": "Email",
+    "externid":     "ECID",
+    "externalid":   "ECID",
+    "ecid":         "ECID",
+    "customerid":   "CustomerID",
+    "userid":       "UserID",
+    "phonenumber":  "Phone",
+    "phone":        "Phone",
+    "mobilenumber": "Phone",
+}
+
+# Business anchor fields → isPrimary=true
+_RULE3_PRIMARY = {"customerid", "userid"}
+
+# Stitching/secondary fields → isPrimary=false
+_RULE3_SECONDARY = {"email", "emailaddress", "externid", "externalid", "ecid", "phonenumber", "phone", "mobilenumber"}
+
+_RULE3_NAMES = _RULE3_PRIMARY | _RULE3_SECONDARY
+
+
+def _auto_map_namespace(field_name: str) -> str | None:
+    return _NAME_TO_NAMESPACE.get((field_name or "").lower())
+
+
 def _derive_namespace(field_name: str) -> str:
+    mapped = _auto_map_namespace(field_name)
+    if mapped:
+        return mapped
     if not field_name:
         return "CustomID"
     return field_name[0].upper() + field_name[1:]
@@ -204,11 +234,34 @@ async def resolve_identity(ctx: dict, data: dict) -> dict:
         }
         return data
 
+    # Rule 3: well-known field name pattern matching
+    attributes = data.get("attributes", [])
+    for attr in attributes:
+        name = (attr.get("name") or "").lower()
+        if name in _RULE3_NAMES:
+            original_name = attr["name"]
+            namespace = _auto_map_namespace(original_name)
+            is_primary = name in _RULE3_PRIMARY
+            data["identityDecision"] = {
+                "status": "resolved",
+                "fieldPath": f"/{original_name}",
+                "isPrimary": is_primary,
+                "namespace": namespace,
+                "reason": (
+                    f"Field name {original_name!r} matched known identity pattern — "
+                    f"auto-mapped to {namespace} ({'primary anchor' if is_primary else 'secondary/stitching identity'})"
+                ),
+            }
+            log.info("Rule 3 identity match: %s → namespace %s, isPrimary=%s", original_name, namespace, is_primary)
+            return data
+
+    # No identity found — warn, do not silently default
+    log.warning("No identity field found for schema %s", ctx.get("schema_name", "unknown"))
     data["identityDecision"] = {
-        "status": "resolved",
-        "fieldPath": "/id",
-        "isPrimary": False,
-        "reason": "No primary or unique keys found — defaulted to surrogate identity",
+        "status": "unresolved",
+        "fieldPath": None,
+        "isPrimary": None,
+        "reason": "No primary key, unique key, or known identity field name found — manual mapping required",
     }
     return data
 
@@ -290,8 +343,8 @@ async def build_payload(ctx: dict, data: dict) -> dict:
     root_name = root.get("name") or ""
     behavior = _infer_behavior(source_name, root_name)
 
-    primary_key = identity.get("fieldPath", "/id").lstrip("/")
-    identity_namespace = _derive_namespace(primary_key)
+    field_path = identity.get("fieldPath")
+    primary_key = field_path.lstrip("/") if field_path else None
 
     version_field = _find_version_field(attributes)
     timestamp_field = _find_timestamp_field(attributes) if behavior == "time-series" else None
@@ -301,7 +354,6 @@ async def build_payload(ctx: dict, data: dict) -> dict:
         "description": schema_meta.get("description") or "",
         "behavior": behavior,
         "primaryKey": primary_key,
-        "identityNamespace": identity_namespace,
         "fields": _build_fields(attributes, xdm_types),
         "relationships": _build_relationships(links_and_joins),
     }
