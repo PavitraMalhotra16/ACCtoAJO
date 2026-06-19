@@ -454,15 +454,20 @@ async def build_payload(ctx: dict, data: dict) -> dict:
     source_name = source.get("name") or source.get("fullName", "")
     root_name = root.get("name") or ""
 
-    # A. title
-    title = (
+    # Namespace prefix — keeps schemas with identical names but different namespaces distinct
+    schema_name = ctx.get("schema_name", "")
+    namespace = schema_name.split(":")[0] if ":" in schema_name else ""
+
+    # A. title — always prefixed with namespace so nms:auditHistory ≠ hdbk:auditHistory
+    base_title = (
         schema_meta.get("label")
         or root.get("label")
         or root.get("sqlTable")
         or source.get("fullName")
         or source_name
-        or ""
+        or schema_name
     )
+    title = f"{namespace}:{base_title}" if namespace else base_title
 
     # B. description
     description = (
