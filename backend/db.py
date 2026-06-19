@@ -6,7 +6,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, String, Text
+from sqlalchemy import Boolean, DateTime, Integer, String, Text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -57,7 +57,8 @@ class ConvertedSchema(Base):
     job_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     login_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     schema_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    json_content: Mapped[str] = mapped_column(Text, nullable=False)
+    raw_json: Mapped[str] = mapped_column(Text, nullable=False)
+    enriched_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -68,6 +69,34 @@ class UserSession(Base):
     login_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class SchemaJobItem(Base):
+    __tablename__ = "schema_job_items"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    job_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    login_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    schema_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="QUEUED")
+    current_step: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    current_step_order: Mapped[int] = mapped_column(Integer, default=0)
+    identity_is_primary: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    current_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TenantConfig(Base):
+    __tablename__ = "tenant_config"
+
+    org_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    sandbox_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 async def get_db():

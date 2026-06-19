@@ -9,11 +9,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
-from db import UserSession, init_db, AsyncSessionLocal
+from db import UserSession, SchemaJobItem, init_db, AsyncSessionLocal
 from config import settings
 from routes.auth import router as auth_router
 from routes.schemas import router as schemas_router
 from routes.conversion import router as conversion_router
+from routes.migrate import router as migrate_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("acc_backend")
@@ -32,6 +33,17 @@ async def lifespan(app: FastAPI):
         await db.commit()
         if expired:
             log.info("Cleaned up %d expired session(s)", len(expired))
+    async with AsyncSessionLocal() as db:
+        interrupted = await db.execute(
+            select(SchemaJobItem).where(SchemaJobItem.status == "RUNNING")
+        )
+        stuck = interrupted.scalars().all()
+        if stuck:
+            log.warning("Found %d interrupted schema(s) on startup — marking as FAILED for re-run", len(stuck))
+            for item in stuck:
+                item.status = "FAILED"
+                item.error_message = "Server restarted mid-pipeline"
+            await db.commit()
     log.info("DB ready")
     yield
 
@@ -49,6 +61,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(schemas_router)
 app.include_router(conversion_router)
+app.include_router(migrate_router)
 
 
 @app.get("/health")

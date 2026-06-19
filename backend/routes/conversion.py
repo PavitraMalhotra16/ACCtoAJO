@@ -86,7 +86,7 @@ async def _run_conversion_job(job_id: str, schemas: list[SchemaRef], acc_conn, l
                         job_id=job_id,
                         login_id=login_id,
                         schema_name=key,
-                        json_content=json.dumps(parsed),
+                        raw_json=json.dumps(parsed),
                     ))
                     await db_session.commit()
 
@@ -125,19 +125,33 @@ async def convert_start(
     if not body.schemas:
         raise HTTPException(400, "No schemas selected")
 
+    # Skip schemas already extracted in DB
+    already_done_result = await db.execute(
+        select(ConvertedSchema.schema_name).where(ConvertedSchema.login_id == login_id)
+    )
+    already_done = {row[0] for row in already_done_result.fetchall()}
+    schemas_to_run = [s for s in body.schemas if f"{s.namespace}:{s.name}" not in already_done]
+
+    if not schemas_to_run:
+        return {
+            "job_id": None,
+            "message": "all_done",
+            "skipped": [f"{s.namespace}:{s.name}" for s in body.schemas],
+        }
+
     job_id = str(uuid.uuid4())
     _jobs[job_id] = {
         "id":             job_id,
         "status":         "pending",
-        "schema_count":   len(body.schemas),
+        "schema_count":   len(schemas_to_run),
         "current_schema": None,
         "steps":          [],
         "success_count":  0,
         "failed_count":   0,
     }
 
-    asyncio.create_task(_run_conversion_job(job_id, body.schemas, acc, login_id))
-    return {"job_id": job_id}
+    asyncio.create_task(_run_conversion_job(job_id, schemas_to_run, acc, login_id))
+    return {"job_id": job_id, "message": "started", "skipped": list(already_done)}
 
 
 @router.post("/start-all")
@@ -212,6 +226,22 @@ async def convert_start_all(
 
     asyncio.create_task(_run_conversion_job(job_id, schemas_to_convert, acc, login_id))
     return {"job_id": job_id, "message": "started", "total": len(schemas), "skipped": len(schemas) - len(schemas_to_convert)}
+
+
+@router.get("/extracted")
+async def list_extracted(
+    acc_session: Optional[str] = Cookie(default=None),
+    acc_user: Optional[str] = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return set of schema_names already extracted in DB for the current user."""
+    login_id = await get_login_from_cookie(acc_session, db, acc_user)
+    if not login_id:
+        raise HTTPException(401, "ACC not authenticated")
+    result = await db.execute(
+        select(ConvertedSchema.schema_name).where(ConvertedSchema.login_id == login_id)
+    )
+    return {"extracted": [row[0] for row in result.fetchall()]}
 
 
 @router.get("/status/{job_id}")
