@@ -214,8 +214,12 @@ async def ajo_connect(
     encrypted_creds = encrypt(f"{body.client_id}:{body.client_secret}")
     encrypted_token = encrypt(access_token)
 
+    # Derive tenant ID once at connect time — no repeated API calls needed
+    tenant_id = "_" + body.org_id.split("@")[0].lower()
+
     if conn:
         conn.client_id = body.client_id
+        conn.tenant_id = tenant_id
         conn.sandbox_name = body.sandbox_name
         conn.encrypted_credentials = encrypted_creds
         conn.encrypted_access_token = encrypted_token
@@ -225,6 +229,7 @@ async def ajo_connect(
     else:
         conn = DestinationConnection(
             org_id=body.org_id,
+            tenant_id=tenant_id,
             client_id=body.client_id,
             sandbox_name=body.sandbox_name,
             encrypted_credentials=encrypted_creds,
@@ -235,7 +240,7 @@ async def ajo_connect(
         )
         db.add(conn)
 
-    log.info("AJO authenticated – orgId=%s", body.org_id)
+    log.info("AJO authenticated – orgId=%s tenantId=%s", body.org_id, tenant_id)
     return {"success": True, "authenticated": True, "expires_in": expires_in}
 
 

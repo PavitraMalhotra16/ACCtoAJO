@@ -40,6 +40,7 @@ class DestinationConnection(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     org_id: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    tenant_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     client_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     sandbox_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     encrypted_credentials: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -96,6 +97,8 @@ class TenantConfig(Base):
     tenant_id: Mapped[str] = mapped_column(String(255), nullable=False)
     sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     sandbox_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # JSON array of {code, name, id, idType} from AEP Identity Namespace API
+    namespaces_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 

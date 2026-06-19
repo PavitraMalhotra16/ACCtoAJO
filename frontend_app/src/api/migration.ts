@@ -110,6 +110,24 @@ export async function startMigration(extractJobId?: string): Promise<{ job_id: s
   return res.json()
 }
 
+export interface IncompleteSchema {
+  schema_name: string
+  status: 'RUNNING' | 'FAILED' | 'QUEUED'
+  current_step: string | null
+  current_step_order: number
+  error_message: string | null
+}
+
+export async function getIncompleteSchemas(): Promise<{ schemas: IncompleteSchema[] }> {
+  try {
+    const res = await fetch('/api/migrate/incomplete', { credentials: 'include' })
+    if (!res.ok) return { schemas: [] }
+    return res.json()
+  } catch {
+    return { schemas: [] }
+  }
+}
+
 export async function getMigrationStatus(jobId: string): Promise<MigrationJob> {
   const res = await fetch(`/api/migrate/status/${jobId}`, { credentials: 'include' })
   if (!res.ok) throw new Error('Job not found')

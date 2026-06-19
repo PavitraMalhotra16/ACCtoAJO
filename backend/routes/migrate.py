@@ -169,6 +169,49 @@ async def migrate_status(
     }
 
 
+@router.get("/incomplete")
+async def incomplete_schemas(
+    acc_session: Optional[str] = Cookie(default=None),
+    acc_user: Optional[str] = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the latest pipeline state per schema that has started but not COMPLETED."""
+    login_id = await get_login_from_cookie(acc_session, db, acc_user)
+    if not login_id:
+        raise HTTPException(401, "Not authenticated")
+
+    result = await db.execute(
+        select(SchemaJobItem)
+        .where(
+            SchemaJobItem.login_id == login_id,
+            SchemaJobItem.status.in_(["RUNNING", "FAILED", "QUEUED"]),
+        )
+        .order_by(SchemaJobItem.created_at.desc())
+    )
+    all_items = result.scalars().all()
+
+    # Keep only the latest entry per schema_name
+    seen: set[str] = set()
+    items = []
+    for i in all_items:
+        if i.schema_name not in seen:
+            seen.add(i.schema_name)
+            items.append(i)
+
+    return {
+        "schemas": [
+            {
+                "schema_name": i.schema_name,
+                "status": i.status,
+                "current_step": i.current_step,
+                "current_step_order": i.current_step_order or 0,
+                "error_message": i.error_message,
+            }
+            for i in items
+        ]
+    }
+
+
 @router.get("/jobs")
 async def list_jobs(
     acc_session: Optional[str] = Cookie(default=None),

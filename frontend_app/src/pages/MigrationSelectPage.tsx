@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getSchemas, getSchemaDetail } from '../api/client'
-import { startConversion, getExtractedSchemas } from '../api/migration'
+import { startConversion, getExtractedSchemas, getIncompleteSchemas, type IncompleteSchema } from '../api/migration'
 
 interface SchemaEntry { namespace: string; name: string; label: string }
 
@@ -154,17 +154,22 @@ export default function MigrationSelectPage() {
   const [loadingDetail, setLoadingDetail] = useState<Set<string>>(new Set())
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [extracted, setExtracted] = useState<Set<string>>(new Set())
+  const [incomplete, setIncomplete] = useState<Record<string, IncompleteSchema>>({})
 
   useEffect(() => {
     Promise.all([
       getSchemas(),
       getExtractedSchemas(),
+      getIncompleteSchemas(),
     ])
-      .then(([schemasData, extractedData]) => {
+      .then(([schemasData, extractedData, incompleteData]) => {
         setSchemas(
           (schemasData.schemas ?? []).filter(s => !EXCLUDED_NAMESPACES.has(s.namespace.toLowerCase()))
         )
         setExtracted(new Set(extractedData.extracted))
+        const incompleteMap: Record<string, IncompleteSchema> = {}
+        for (const s of incompleteData.schemas) incompleteMap[s.schema_name] = s
+        setIncomplete(incompleteMap)
       })
       .catch(e => setError(`Failed to load schemas: ${e.message}`))
       .finally(() => setLoading(false))
@@ -320,24 +325,31 @@ export default function MigrationSelectPage() {
             {error && <p className="text-sm text-red-500 p-4">{error}</p>}
             {filtered.map(s => {
               const k = key(s)
+              const schemaKey = `${s.namespace}:${s.name}`
               const checked = selected.has(k)
-              const alreadyExtracted = extracted.has(k)
+              const alreadyExtracted = extracted.has(schemaKey)
+              const inProgress = incomplete[schemaKey]
+              const isLocked = alreadyExtracted || !!inProgress
+
               return (
                 <div
                   key={k}
                   className={`flex items-start gap-3 px-4 py-3 border-b border-gray-100 transition-colors ${
-                    alreadyExtracted
-                      ? 'bg-gray-50 cursor-default opacity-70'
+                    isLocked
+                      ? 'bg-gray-50 cursor-default'
                       : checked
                         ? 'bg-blue-50 border-l-2 border-l-blue-500 cursor-pointer'
                         : 'hover:bg-gray-50 cursor-pointer'
                   }`}
-                  onClick={() => { if (!alreadyExtracted) toggle(s) }}
+                  onClick={() => { if (!isLocked) toggle(s) }}
                 >
+                  {/* Left icon */}
                   {alreadyExtracted ? (
                     <svg className="mt-0.5 w-4 h-4 text-green-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/>
                     </svg>
+                  ) : inProgress ? (
+                    <div className={`mt-0.5 w-4 h-4 shrink-0 rounded-full border-2 ${inProgress.status === 'FAILED' ? 'border-red-400' : 'border-blue-400'}`} />
                   ) : (
                     <input
                       type="checkbox"
@@ -347,15 +359,28 @@ export default function MigrationSelectPage() {
                       className="mt-0.5 rounded"
                     />
                   )}
+
                   <div className="min-w-0 flex-1">
-                    <div className={`text-xs font-mono truncate ${alreadyExtracted ? 'text-gray-500' : 'text-blue-700'}`}>
+                    <div className={`text-xs font-mono truncate ${isLocked ? 'text-gray-500' : 'text-blue-700'}`}>
                       {s.namespace}:{s.name}
                     </div>
-                    <div className="flex items-center gap-2 mt-0.5">
+                    <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                       {s.label && <span className="text-xs text-gray-400 truncate">{s.label}</span>}
+
                       {alreadyExtracted && (
                         <span className="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-700 font-medium shrink-0">
                           Extracted — enriched JSON ready
+                        </span>
+                      )}
+
+                      {inProgress && (
+                        <span className={`text-xs px-1.5 py-0.5 rounded font-medium shrink-0 ${
+                          inProgress.status === 'FAILED' ? 'bg-red-50 text-red-600' : 'bg-amber-50 text-amber-600'
+                        }`}>
+                          {inProgress.status === 'FAILED' ? 'Failed at' : 'Stopped at'}{' '}
+                          {inProgress.current_step
+                            ? inProgress.current_step === 'BUILD_PAYLOAD' ? 'Enriched JSON' : 'Extracted schema'
+                            : `step ${inProgress.current_step_order}`}
                         </span>
                       )}
                     </div>

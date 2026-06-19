@@ -4,9 +4,8 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from db import AsyncSessionLocal, ConvertedSchema, DestinationConnection, TenantConfig
+from db import AsyncSessionLocal, ConvertedSchema, DestinationConnection
 from core.security import decrypt, encrypt
 
 IMS_TOKEN_URL = "https://ims-na1.adobelogin.com/ims/token/v3"
@@ -64,33 +63,44 @@ async def get_valid_access_token(dest: DestinationConnection, db) -> str:
 
 log = logging.getLogger("acc_backend.pipeline.handlers")
 
-ACC_TO_XDM: dict[str, dict] = {
-    "string":   {"type": "string"},
-    "memo":     {"type": "string"},
-    "uuid":     {"type": "string"},
-    "int32":    {"type": "integer"},
-    "int64":    {"type": "integer"},
-    "short":    {"type": "integer"},
-    "byte":     {"type": "integer"},
-    "long":     {"type": "integer"},
-    "double":   {"type": "number"},
-    "float":    {"type": "number"},
-    "boolean":  {"type": "boolean"},
-    "datetime": {"type": "string", "format": "date-time"},
-    "date":     {"type": "string", "format": "date"},
+ACC_TO_XDM: dict[str, str] = {
+    "string":   "string",
+    "memo":     "string",
+    "uuid":     "string",
+    "int":      "integer",
+    "int32":    "integer",
+    "integer":  "integer",
+    "short":    "integer",
+    "byte":     "integer",
+    "int64":    "integer",
+    "long":     "integer",
+    "double":   "number",
+    "float":    "number",
+    "number":   "number",
+    "boolean":  "boolean",
+    "datetime": "datetime",
+    "date":     "date",
 }
 
+# CDC ingestion control column — never part of the schema
+_EXCLUDED_FIELDS = {"_change_request_type"}
+
 _TIME_SERIES_KEYWORDS = {"log", "tracking", "history", "broadlog", "event", "histo", "delivery", "statistics"}
-_VERSION_FIELD_PATTERNS = {"lastmodified", "tslastmodified", "lastupdate", "modifieddate", "updatedat", "dtmodified", "tsmodification", "tschanged", "modified"}
-_TIMESTAMP_FIELD_PATTERNS = {"tsevent", "timestamp", "eventdate", "logdate", "eventts", "eventtime", "tscreated"}
 
+_VERSION_FIELD_NAMES = [
+    "lastmodified", "tslastmodified", "lastmodifieddate", "modified",
+    "updated", "updatedate", "updatedat", "dtmodified", "tsmodification",
+    "tschanged", "version", "versionnumber",
+]
+_TIMESTAMP_FIELD_NAMES = [
+    "eventdate", "eventtime", "timestamp", "logdate", "tsevent",
+    "eventts", "eventtime", "tscreated", "created", "contactdate",
+]
+_IDENTITY_PRECEDENCE = [
+    "email", "customerid", "personid", "recipientid", "crmid", "phone", "mobilephone",
+]
 
-def _infer_behavior(source_name: str, root_name: str) -> str:
-    combined = (source_name + root_name).lower()
-    return "time-series" if any(kw in combined for kw in _TIME_SERIES_KEYWORDS) else "record"
-
-
-# Rule 3: well-known field names → standard AEP identity namespaces
+# Well-known field → AEP standard namespace (used only for identityDescriptor in Phase 3)
 _NAME_TO_NAMESPACE: dict[str, str] = {
     "email":        "Email",
     "emailaddress": "Email",
@@ -103,13 +113,8 @@ _NAME_TO_NAMESPACE: dict[str, str] = {
     "phone":        "Phone",
     "mobilenumber": "Phone",
 }
-
-# Business anchor fields → isPrimary=true
 _RULE3_PRIMARY = {"customerid", "userid"}
-
-# Stitching/secondary fields → isPrimary=false
 _RULE3_SECONDARY = {"email", "emailaddress", "externid", "externalid", "ecid", "phonenumber", "phone", "mobilenumber"}
-
 _RULE3_NAMES = _RULE3_PRIMARY | _RULE3_SECONDARY
 
 
@@ -126,33 +131,156 @@ def _derive_namespace(field_name: str) -> str:
     return field_name[0].upper() + field_name[1:]
 
 
-def _find_version_field(attributes: list[dict]) -> str | None:
-    for attr in attributes:
-        if any(p in (attr.get("name") or "").lower() for p in _VERSION_FIELD_PATTERNS):
-            return attr["name"]
-    for attr in attributes:
-        if (attr.get("type") or "").lower() in ("datetime", "date"):
-            return attr["name"]
+def _match_org_namespace(field_name: str, org_namespaces: list[dict]) -> str | None:
+    import re
+    normalized = re.sub(r"[^a-z0-9]", "", field_name.lower())
+    for ns in org_namespaces:
+        code = re.sub(r"[^a-z0-9]", "", (ns.get("code") or "").lower())
+        name = re.sub(r"[^a-z0-9]", "", (ns.get("name") or "").lower())
+        if normalized == code or normalized == name:
+            return ns.get("code")
     return None
 
 
-def _find_timestamp_field(attributes: list[dict]) -> str | None:
+def _infer_behavior(source_name: str, root_name: str) -> str:
+    combined = (source_name + root_name).lower()
+    return "time-series" if any(kw in combined for kw in _TIME_SERIES_KEYWORDS) else "record"
+
+
+def _compute_primary_key(keys: dict) -> list[str]:
+    """Returns the primary key as a list. Empty list = unresolved."""
+    pk = keys.get("primaryKeys", [])
+    if pk:
+        fields = pk[0].get("fields", [])
+        if fields:
+            return list(fields)
+
+    composite = keys.get("compositeKeys", [])
+    if composite:
+        fields = composite[0].get("fields", [])
+        if fields:
+            return list(fields)
+
+    auto_pk = keys.get("autoPk", {})
+    if auto_pk.get("enabled"):
+        return [auto_pk.get("field") or "id"]
+
+    return []
+
+
+def _compute_behavior(keys: dict, source_name: str, root_name: str) -> str:
+    auto_pk = keys.get("autoPk", {})
+    primary_keys = keys.get("primaryKeys", [])
+    composite_keys = keys.get("compositeKeys", [])
+
+    if auto_pk.get("enabled"):
+        return "record"
+
+    if composite_keys:
+        return "time-series"
+
+    if primary_keys:
+        fields = primary_keys[0].get("fields", [])
+        if len(fields) > 1:
+            return "time-series"
+
+    has_any_pk = bool(primary_keys) or bool(composite_keys) or auto_pk.get("enabled")
+    if not has_any_pk:
+        return "time-series"
+
+    return _infer_behavior(source_name, root_name)
+
+
+def _compute_version_field(attributes: list[dict], primary_key: list[str], xdm_types: dict) -> str | None:
+    """Version field must be datetime or numeric, and must not be in primaryKey."""
+    _NUMERIC = {"integer", "long", "number"}
+    _DATETIME = {"datetime", "date"}
+    pk_set = set(primary_key)
+
+    def is_eligible(attr: dict) -> bool:
+        name = attr.get("name") or ""
+        t = xdm_types.get(name, "string")
+        return t in (_NUMERIC | _DATETIME) and name not in pk_set
+
     for attr in attributes:
-        if any(p in (attr.get("name") or "").lower() for p in _TIMESTAMP_FIELD_PATTERNS):
+        name = (attr.get("name") or "").lower()
+        if any(p == name or p in name for p in _VERSION_FIELD_NAMES) and is_eligible(attr):
             return attr["name"]
+
+    # Fallback: any eligible datetime field
+    for attr in attributes:
+        if is_eligible(attr) and xdm_types.get(attr.get("name") or "", "string") in _DATETIME:
+            return attr["name"]
+
     return None
 
 
-def _build_fields(attributes: list[dict], xdm_types: dict) -> list[dict]:
+def _compute_timestamp_field(attributes: list[dict], primary_key: list[str], xdm_types: dict) -> str | None:
+    """Timestamp field must be datetime and must be (or will be added to) primaryKey."""
+    datetime_attrs = [
+        a for a in attributes
+        if xdm_types.get(a.get("name") or "", "string") in ("datetime", "date")
+    ]
+
+    for attr in datetime_attrs:
+        name = (attr.get("name") or "").lower()
+        if any(p == name or p in name for p in _TIMESTAMP_FIELD_NAMES):
+            return attr["name"]
+
+    # Fallback: first datetime field
+    return datetime_attrs[0]["name"] if datetime_attrs else None
+
+
+def _compute_identity_field(attributes: list[dict], primary_key: list[str], xdm_types: dict) -> str | None:
+    attr_lower = {(a.get("name") or "").lower(): a.get("name") for a in attributes}
+
+    for pattern in _IDENTITY_PRECEDENCE:
+        if pattern in attr_lower:
+            return attr_lower[pattern]
+
+    # Fallback: first string primary key field
+    for pk_field in primary_key:
+        if xdm_types.get(pk_field, "string") == "string":
+            return pk_field
+
+    return None
+
+
+def _xdm_field_type(xdm_type: str) -> dict:
+    """Convert internal type token to the final JSON field type shape."""
+    if xdm_type == "datetime":
+        return {"type": "string", "format": "date-time"}
+    if xdm_type == "date":
+        return {"type": "string", "format": "date"}
+    return {"type": xdm_type}
+
+
+def _build_fields(
+    attributes: list[dict],
+    xdm_types: dict,
+    required_overrides: set[str],
+) -> list[dict]:
     fields = []
     for attr in attributes:
         name = attr.get("name")
-        if not name:
+        if not name or name in _EXCLUDED_FIELDS:
             continue
-        xdm = xdm_types.get(name, {"type": "string"})
-        field: dict = {"name": name, "title": attr.get("label") or name, "type": xdm.get("type", "string")}
-        if "format" in xdm:
-            field["format"] = xdm["format"]
+        xdm_type = xdm_types.get(name, "string")
+        type_shape = _xdm_field_type(xdm_type)
+        is_required = bool(
+            attr.get("required")
+            or attr.get("notNull")
+            or attr.get("nullable") is False
+            or name in required_overrides
+        )
+        field: dict = {
+            "name": name,
+            "required": is_required,
+            "label": attr.get("label") or name,
+            "description": attr.get("description") or "",
+            "sourcePath": attr.get("xpath") or f"/{name}",
+        }
+        field.update(type_shape)  # adds "type" and optionally "format"
         fields.append(field)
     return fields
 
@@ -162,13 +290,28 @@ def _build_relationships(links_and_joins: list[dict]) -> list[dict]:
     for link in links_and_joins:
         if not link.get("targetSchema"):
             continue
-        join = link.get("join", {})
+        join = link.get("join") or {}
+        is_composite = bool(join.get("composite", False))
+        source_field = join.get("sourceField")
+        dest_field = join.get("destinationField")
+
+        foreign_key = (
+            ([source_field] if source_field else []) if is_composite else source_field
+        )
+        target_key = (
+            ([dest_field] if dest_field else None) if is_composite else dest_field
+        )
+
         result.append({
-            "name": link.get("name"),
-            "sourceField": join.get("sourceField"),
+            "foreignKey": foreign_key,
             "targetSchema": link["targetSchema"],
-            "targetField": join.get("destinationField"),
-            "cardinality": link.get("cardinality"),
+            "targetKey": target_key,
+            "cardinality": link.get("cardinality") or "M:1",
+            "composite": is_composite,
+            "sourceLabel": link.get("sourceLabel"),
+            "destinationLabel": link.get("destinationLabel"),
+            "integrity": link.get("integrity"),
+            "reverseIntegrity": link.get("reverseIntegrity"),
         })
     return result
 
@@ -183,13 +326,13 @@ async def load_json(ctx: dict, data: dict) -> dict:
 
 
 async def map_types(ctx: dict, data: dict) -> dict:
-    xdm_types: dict[str, dict] = {}
+    xdm_types: dict[str, str] = {}
     for attr in data.get("attributes", []):
         name = attr.get("name")
         if not name:
             continue
         acc_type = (attr.get("type") or "string").lower()
-        xdm_types[name] = ACC_TO_XDM.get(acc_type, {"type": "string"})
+        xdm_types[name] = ACC_TO_XDM.get(acc_type, "string")
         if acc_type not in ACC_TO_XDM:
             log.warning("Unknown ACC type %r for field %r — defaulting to string", acc_type, name)
     data["xdmTypes"] = xdm_types
@@ -214,10 +357,13 @@ async def resolve_identity(ctx: dict, data: dict) -> dict:
     if primary_keys:
         fields = primary_keys[0].get("fields", [])
         if fields:
+            field = fields[0]
+            namespace = _auto_map_namespace(field)
             data["identityDecision"] = {
                 "status": "resolved",
-                "fieldPath": f"/{fields[0]}",
+                "fieldPath": f"/{field}",
                 "isPrimary": True,
+                "namespace": namespace or _derive_namespace(field),
                 "reason": "Explicit primary key field — treated as primary identity",
             }
             return data
@@ -226,10 +372,12 @@ async def resolve_identity(ctx: dict, data: dict) -> dict:
     if unique_keys:
         fields = unique_keys[0].get("fields", [])
         field = fields[0] if fields else "id"
+        namespace = _auto_map_namespace(field)
         data["identityDecision"] = {
             "status": "resolved",
             "fieldPath": f"/{field}",
             "isPrimary": True,
+            "namespace": namespace or _derive_namespace(field),
             "reason": "No explicit PK — first unique key used as primary identity",
         }
         return data
@@ -266,67 +414,31 @@ async def resolve_identity(ctx: dict, data: dict) -> dict:
     return data
 
 
+def _derive_tenant_id(org_id: str) -> str:
+    """Adobe tenant ID = underscore + lowercase of the org ID before @AdobeOrg."""
+    base = org_id.split("@")[0].lower()
+    return f"_{base}"
+
+
 async def fetch_tenant_id(ctx: dict, data: dict) -> dict:
+    """Read tenant ID from DestinationConnection — set once at AJO connect time."""
     org_id = ctx["org_id"]
 
     async with AsyncSessionLocal() as db:
-        cached_result = await db.execute(
-            select(TenantConfig).where(TenantConfig.org_id == org_id)
-        )
-        cached = cached_result.scalar_one_or_none()
-
-        if cached and (datetime.now(timezone.utc) - cached.fetched_at) < timedelta(hours=24):
-            log.info("Tenant ID cache hit for org %s", org_id)
-            data["tenantId"] = cached.tenant_id
-            return data
-
         dest_result = await db.execute(
             select(DestinationConnection).where(DestinationConnection.org_id == org_id)
         )
         dest = dest_result.scalar_one_or_none()
-        if not dest or not dest.encrypted_access_token:
-            raise ValueError(f"No AJO credentials found for org {org_id}")
 
-        access_token = await get_valid_access_token(dest, db)
-        client_id = dest.client_id or ""
-        if not client_id:
-            raise ValueError(f"No client_id found for org {org_id}")
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(
-                "https://platform.adobe.io/data/foundation/schemaregistry/stats",
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "x-api-key": client_id,
-                    "x-gw-ims-org-id": org_id,
-                    "x-sandbox-name": (dest.sandbox_name or "prod").strip(),
-                },
-            )
-
-        if resp.status_code != 200:
-            raise ValueError(f"AEP tenant API returned {resp.status_code}: {resp.text[:300]}")
-
-        payload = resp.json()
-        tenant_id = payload.get("tenantId")
-        if not tenant_id:
-            raise ValueError(f"tenantId not found in AEP stats response: {str(payload)[:200]}")
-
-        # Upsert — safe against concurrent schemas racing to insert the same org_id
-        stmt = pg_insert(TenantConfig).values(
-            org_id=org_id,
-            tenant_id=tenant_id,
-            sandbox_id=(dest.sandbox_name or "").strip(),
-            sandbox_type="production",
-            fetched_at=datetime.now(timezone.utc),
-        ).on_conflict_do_update(
-            index_elements=["org_id"],
-            set_={"tenant_id": tenant_id, "fetched_at": datetime.now(timezone.utc)},
-        )
-        await db.execute(stmt)
-        await db.commit()
+    if dest and dest.tenant_id:
+        tenant_id = dest.tenant_id
+    else:
+        # Fallback: derive from org_id if not yet stored (old connections pre-migration)
+        tenant_id = _derive_tenant_id(org_id)
+        log.warning("tenant_id not on DestinationConnection for %s — derived as %s", org_id, tenant_id)
 
     data["tenantId"] = tenant_id
-    log.info("Fetched tenant ID %r for org %s", tenant_id, org_id)
+    log.info("Tenant ID %r for org %s", tenant_id, org_id)
     return data
 
 
@@ -336,44 +448,80 @@ async def build_payload(ctx: dict, data: dict) -> dict:
     root = data.get("rootElement", {})
     attributes = data.get("attributes", [])
     xdm_types = data.get("xdmTypes", {})
-    identity = data.get("identityDecision", {})
+    keys = data.get("keys", {})
     links_and_joins = data.get("linksAndJoins", [])
 
     source_name = source.get("name") or source.get("fullName", "")
     root_name = root.get("name") or ""
-    behavior = _infer_behavior(source_name, root_name)
 
-    field_path = identity.get("fieldPath")
-    primary_key = field_path.lstrip("/") if field_path else None
+    # A. title
+    title = (
+        schema_meta.get("label")
+        or root.get("label")
+        or root.get("sqlTable")
+        or source.get("fullName")
+        or source_name
+        or ""
+    )
 
-    version_field = _find_version_field(attributes)
-    timestamp_field = _find_timestamp_field(attributes) if behavior == "time-series" else None
+    # B. description
+    description = (
+        schema_meta.get("description")
+        or schema_meta.get("labelSingular")
+        or root.get("label")
+        or f"Schema for {title}"
+    )
+
+    # C. behavior (key-structure first, keyword fallback)
+    behavior = _compute_behavior(keys, source_name, root_name)
+
+    # E. primaryKey — always a list
+    primary_key = _compute_primary_key(keys)
+
+    # G. timestampField — only for time-series; must be in primaryKey
+    timestamp_field: str | None = None
+    if behavior == "time-series":
+        timestamp_field = _compute_timestamp_field(attributes, primary_key, xdm_types)
+        if timestamp_field and timestamp_field not in primary_key:
+            primary_key.append(timestamp_field)
+
+    # F. versionField — datetime/numeric, not in primaryKey
+    version_field = _compute_version_field(attributes, primary_key, xdm_types)
+
+    # H. identityField — single field name, simple precedence
+    identity_field = _compute_identity_field(attributes, primary_key, xdm_types)
+
+    # Required overrides: PK fields + versionField + timestampField must be required in fields[]
+    required_overrides: set[str] = set(primary_key)
+    if version_field:
+        required_overrides.add(version_field)
+    if timestamp_field:
+        required_overrides.add(timestamp_field)
+
+    # D. fields
+    fields = _build_fields(attributes, xdm_types, required_overrides)
+
+    # I. relationships
+    relationships = _build_relationships(links_and_joins)
 
     payload: dict = {
-        "title": schema_meta.get("label") or root.get("label") or source_name,
-        "description": schema_meta.get("description") or "",
+        "title": title,
+        "description": description,
         "behavior": behavior,
+        "tenantId": data.get("tenantId"),
+        "fields": fields,
         "primaryKey": primary_key,
-        "fields": _build_fields(attributes, xdm_types),
-        "relationships": _build_relationships(links_and_joins),
+        "versionField": version_field,
+        "timestampField": timestamp_field,
+        "identityField": identity_field,
+        "relationships": relationships,
     }
-    if version_field:
-        payload["versionField"] = version_field
-    if timestamp_field:
-        payload["timestampField"] = timestamp_field
 
     data["ajoPayload"] = payload
-    log.info("Built payload for %s: behavior=%s primaryKey=%s", source_name, behavior, primary_key)
+    log.info(
+        "Built payload for %s: behavior=%s primaryKey=%s identityField=%s",
+        source_name, behavior, primary_key, identity_field,
+    )
     return data
 
 
-async def call_schema_api_stub(ctx: dict, data: dict) -> dict:
-    return data
-
-
-async def call_identity_descriptor_stub(ctx: dict, data: dict) -> dict:
-    return data
-
-
-async def verify_stub(ctx: dict, data: dict) -> dict:
-    return data

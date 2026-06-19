@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   getExtractionStatus,
+  getIncompleteSchemas,
   getMigrationStatus,
   listMigrationJobs,
   startMigration,
   type ExtractionJob,
+  type IncompleteSchema,
   type MigrationJob,
   type MigrationSchemaItem,
 } from '../api/migration'
@@ -71,24 +73,16 @@ function InProgressCard({ s }: { s: MigrationSchemaItem }) {
 }
 
 function CompletedCard({ s }: { s: MigrationSchemaItem }) {
-  // true = explicit business key, false = surrogate/auto key, null = no key at all
-  const hasBusinessKey = s.identity_is_primary === true
-  const hasSurrogateKey = s.identity_is_primary === false
-  const noKeyAtAll = s.identity_is_primary === null
   const dur = duration(s.created_at!, s.completed_at)
-
   return (
-    <div className={`bg-white border rounded-xl px-5 py-3.5 flex items-center gap-3 ${noKeyAtAll ? 'border-orange-300' : 'border-gray-200'}`}>
-      <div className={`w-4 h-4 rounded border-2 shrink-0 ${hasBusinessKey ? 'border-teal-400' : hasSurrogateKey ? 'border-blue-300' : 'border-orange-300'}`} />
+    <div className="bg-white border border-green-200 rounded-xl px-5 py-3.5 flex items-center gap-3">
+      <svg className="w-4 h-4 text-green-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/>
+      </svg>
       <span className="font-mono text-sm text-gray-800 flex-1">{s.schema_name}</span>
-      <div className="flex items-center gap-3 text-xs text-gray-400">
-        <span className={hasBusinessKey ? 'text-gray-500' : hasSurrogateKey ? 'text-blue-500' : 'text-orange-500'}>
-          Identity: {hasBusinessKey ? 'resolved' : hasSurrogateKey ? 'surrogate key' : 'unresolved'}
-        </span>
-        {dur && <span>· {dur}</span>}
-        {noKeyAtAll && (
-          <span className="px-2 py-0.5 rounded-full bg-orange-100 text-orange-600 font-medium">No business key</span>
-        )}
+      <div className="flex items-center gap-2 text-xs">
+        <span className="px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">Enriched JSON ready</span>
+        {dur && <span className="text-gray-400">· {dur}</span>}
       </div>
     </div>
   )
@@ -143,15 +137,45 @@ function QueuedCard({ s }: { s: MigrationSchemaItem }) {
   )
 }
 
-function MigrationDashboard({ job, startedAt }: { job: MigrationJob; startedAt: string | null }) {
-  const inProgress = job.schemas.filter(s => s.status === 'RUNNING')
-  const completed = job.schemas.filter(s => s.status === 'COMPLETED')
-  const failed = job.schemas.filter(s => s.status === 'FAILED')
-  const queued = job.schemas.filter(s => s.status === 'QUEUED')
-  const identityUnresolved = job.schemas.filter(
+function incompleteToItem(s: IncompleteSchema): MigrationSchemaItem {
+  return {
+    id: `inc-${s.schema_name}`,
+    schema_name: s.schema_name,
+    status: s.status,
+    current_step: s.current_step,
+    current_step_order: s.current_step_order,
+    identity_is_primary: null,
+    error_message: s.error_message,
+    created_at: '',
+    completed_at: null,
+  }
+}
+
+function MigrationDashboard({
+  job,
+  startedAt,
+  stuckSchemas,
+}: {
+  job: MigrationJob
+  startedAt: string | null
+  stuckSchemas: IncompleteSchema[]
+}) {
+  // Merge: current job schemas take priority; stuck schemas from other jobs fill in
+  const currentNames = new Set(job.schemas.map(s => s.schema_name))
+  const extraItems = stuckSchemas
+    .filter(s => !currentNames.has(s.schema_name))
+    .map(incompleteToItem)
+  const allSchemas = [...job.schemas, ...extraItems]
+
+  const inProgress = allSchemas.filter(s => s.status === 'RUNNING')
+  const completed = allSchemas.filter(s => s.status === 'COMPLETED')
+  const failed = allSchemas.filter(s => s.status === 'FAILED')
+  const queued = allSchemas.filter(s => s.status === 'QUEUED')
+  const identityUnresolved = allSchemas.filter(
     s => s.status === 'COMPLETED' && s.identity_is_primary === null
   ).length
-  const allDone = job.running === 0 && job.queued === 0
+  const allDone = inProgress.length === 0 && queued.length === 0
+  const total = allSchemas.length
   const QUEUED_PREVIEW = 2
 
   return (
@@ -161,7 +185,7 @@ function MigrationDashboard({ job, startedAt }: { job: MigrationJob; startedAt: 
         <h1 className="text-2xl font-bold text-gray-900">Schema extraction</h1>
         <p className="text-sm text-gray-400 mt-1">
           {startedAt && `Job started ${timeAgo(startedAt)} · `}
-          {job.total} schemas
+          {total} schemas
           {!allDone && ' · Runs in background — safe to close this window'}
         </p>
       </div>
@@ -169,10 +193,10 @@ function MigrationDashboard({ job, startedAt }: { job: MigrationJob; startedAt: 
       {/* Stat cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {[
-          { label: 'Total', value: job.total, color: 'text-gray-900' },
-          { label: 'Extracted', value: job.completed, color: 'text-green-600' },
-          { label: 'In progress', value: job.running, color: 'text-blue-600' },
-          { label: 'Failed', value: job.failed, color: 'text-red-600' },
+          { label: 'Total', value: total, color: 'text-gray-900' },
+          { label: 'Extracted', value: completed.length, color: 'text-green-600' },
+          { label: 'In progress', value: inProgress.length, color: 'text-blue-600' },
+          { label: 'Failed', value: failed.length, color: 'text-red-600' },
         ].map(card => (
           <div key={card.label} className="bg-gray-50 border border-gray-200 rounded-xl px-4 py-3">
             <p className="text-xs text-gray-400 mb-1">{card.label}</p>
@@ -224,7 +248,7 @@ function MigrationDashboard({ job, startedAt }: { job: MigrationJob; startedAt: 
       {/* All done */}
       {allDone && failed.length === 0 && (
         <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-center text-green-700 font-medium text-sm">
-          All {job.completed} schemas extracted — enriched JSON ready
+          All {completed.length} schemas extracted — enriched JSON ready
         </div>
       )}
     </div>
@@ -294,6 +318,7 @@ export default function MigrationRunPage() {
   const [migrateJob, setMigrateJob] = useState<MigrationJob | null>(null)
   const [startedAt, setStartedAt] = useState<string | null>(null)
   const [migrateJobId, setMigrateJobId] = useState<string | null>(resumeJobId)
+  const [stuckSchemas, setStuckSchemas] = useState<IncompleteSchema[]>([])
   const [error, setError] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -349,9 +374,15 @@ export default function MigrationRunPage() {
 
     async function pollMigration() {
       try {
-        const data = await getMigrationStatus(migrateJobId!)
+        const [data, incData] = await Promise.all([
+          getMigrationStatus(migrateJobId!),
+          getIncompleteSchemas(),
+        ])
         setMigrateJob(data)
         if (!startedAt && (data as any).started_at) setStartedAt((data as any).started_at)
+        // Stuck = incomplete schemas NOT in current job (they're from previous jobs)
+        const currentNames = new Set(data.schemas.map((s: MigrationSchemaItem) => s.schema_name))
+        setStuckSchemas(incData.schemas.filter(s => !currentNames.has(s.schema_name)))
         if (data.running === 0 && data.queued === 0) {
           if (pollRef.current) clearInterval(pollRef.current)
           setPhase('done')
@@ -405,7 +436,7 @@ export default function MigrationRunPage() {
                 }`}>
                   {done && <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/></svg>}
                   {active && <svg className="animate-spin w-3 h-3" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>}
-                  {p === 'extracting' ? 'Extract' : p === 'migrating' ? 'Migrate' : 'Done'}
+                  {p === 'extracting' ? 'Extract' : p === 'migrating' ? 'Enrich JSON' : 'Done'}
                 </div>
                 {i < 2 && <div className={`w-6 h-px ${i < phaseLabels.indexOf(phase) ? 'bg-green-300' : 'bg-gray-200'}`} />}
               </div>
@@ -429,8 +460,8 @@ export default function MigrationRunPage() {
             <div>
               <p className={`font-semibold text-base ${migrateJob.failed === 0 ? 'text-green-700' : 'text-yellow-700'}`}>
                 {migrateJob.failed === 0
-                  ? `Migration complete — all ${migrateJob.completed} schemas migrated successfully`
-                  : `Migration finished — ${migrateJob.completed} succeeded, ${migrateJob.failed} failed`}
+                  ? `Extraction complete — all ${migrateJob.completed} schemas extracted, enriched JSON ready`
+                  : `Extraction finished — ${migrateJob.completed} extracted, ${migrateJob.failed} failed`}
               </p>
               <p className="text-xs text-gray-400 mt-0.5">Final results shown below</p>
             </div>
@@ -446,7 +477,7 @@ export default function MigrationRunPage() {
         {phase === 'extracting' && <ExtractionLoadingView job={extractJob} />}
 
         {(phase === 'migrating' || allDone) && migrateJob && (
-          <MigrationDashboard job={migrateJob} startedAt={startedAt} />
+          <MigrationDashboard job={migrateJob} startedAt={startedAt} stuckSchemas={stuckSchemas} />
         )}
 
         {(phase === 'migrating' || phase === 'done') && !migrateJob && !error && (
