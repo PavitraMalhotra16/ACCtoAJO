@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getSchemas, getSchemaDetail } from '../api/client'
-import { startConversion, getExtractedSchemas, getIncompleteSchemas, type IncompleteSchema } from '../api/migration'
+import { startConversion, getExtractedSchemas, getIncompleteSchemas, startMigrationDirect, type IncompleteSchema } from '../api/migration'
 
 interface SchemaEntry { namespace: string; name: string; label: string }
 
@@ -163,13 +163,25 @@ export default function MigrationSelectPage() {
       getIncompleteSchemas(),
     ])
       .then(([schemasData, extractedData, incompleteData]) => {
-        setSchemas(
-          (schemasData.schemas ?? []).filter(s => !EXCLUDED_NAMESPACES.has(s.namespace.toLowerCase()))
+        const allSchemas = (schemasData.schemas ?? []).filter(
+          s => !EXCLUDED_NAMESPACES.has(s.namespace.toLowerCase())
         )
+        setSchemas(allSchemas)
         setExtracted(new Set(extractedData.extracted))
+
         const incompleteMap: Record<string, IncompleteSchema> = {}
         for (const s of incompleteData.schemas) incompleteMap[s.schema_name] = s
         setIncomplete(incompleteMap)
+
+        // Pre-select all FAILED schemas so the user can retry them immediately
+        const failedKeys = new Set(
+          incompleteData.schemas
+            .filter(s => s.status === 'FAILED')
+            .map(s => s.schema_name)
+        )
+        if (failedKeys.size > 0) {
+          setSelected(failedKeys)
+        }
       })
       .catch(e => setError(`Failed to load schemas: ${e.message}`))
       .finally(() => setLoading(false))
@@ -248,6 +260,21 @@ export default function MigrationSelectPage() {
     setStarting(true)
     setError(null)
     try {
+      // If every selected schema already has extracted JSON (all are failed-migration
+      // retries, not new selections), skip re-extraction and go straight to migration.
+      const allAlreadyExtracted = chosen.every(s => extracted.has(key(s)))
+      if (allAlreadyExtracted) {
+        const data = await startMigrationDirect()
+        if (data.message === 'all_done') {
+          setError('All selected schemas are already fully migrated.')
+          setStarting(false)
+          return
+        }
+        navigate(`/migration/run?migrate_job=${data.job_id}`)
+        return
+      }
+
+      // Normal path: new schemas need extraction first
       const data = await startConversion(chosen)
       if (data.message === 'all_done' || !data.job_id) {
         setError('All selected schemas are already migrated — nothing new to extract.')
@@ -256,7 +283,7 @@ export default function MigrationSelectPage() {
       }
       navigate(`/migration/run?extract_job=${data.job_id}`)
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Failed to start conversion')
+      setError(e instanceof Error ? e.message : 'Failed to start')
       setStarting(false)
     }
   }
