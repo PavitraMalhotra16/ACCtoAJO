@@ -365,7 +365,7 @@ export default function MigrationSelectPage() {
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/>
                     </svg>
                   ) : inProgress ? (
-                    <div className={`mt-0.5 w-4 h-4 shrink-0 rounded-full border-2 ${inProgress.status === 'FAILED' ? 'border-red-400' : 'border-blue-400'}`} />
+                    <div className="mt-0.5 w-4 h-4 shrink-0 rounded-full border-2 border-blue-400" />
                   ) : (
                     <input
                       type="checkbox"
@@ -400,10 +400,8 @@ export default function MigrationSelectPage() {
                       )}
 
                       {!isFailed && inProgress && (
-                        <span className={`text-xs px-1.5 py-0.5 rounded font-medium shrink-0 ${
-                          inProgress.status === 'FAILED' ? 'bg-red-50 text-red-600' : 'bg-amber-50 text-amber-600'
-                        }`}>
-                          {inProgress.status === 'FAILED' ? 'Failed at' : 'Stopped at'}{' '}
+                        <span className="text-xs px-1.5 py-0.5 rounded font-medium shrink-0 bg-amber-50 text-amber-600">
+                          {inProgress.status === 'RUNNING' ? 'In progress' : 'Stopped at'}{' '}
                           {inProgress.current_step
                             ? inProgress.current_step === 'BUILD_PAYLOAD' ? 'Enriched JSON' : 'Extracted schema'
                             : `step ${inProgress.current_step_order}`}
