@@ -329,22 +329,38 @@ export default function MigrationSelectPage() {
               const checked = selected.has(k)
               const alreadyExtracted = extracted.has(schemaKey)
               const inProgress = incomplete[schemaKey]
-              const isLocked = alreadyExtracted || !!inProgress
+              const isFailed = inProgress?.status === 'FAILED'
+
+              // FAILED pipeline status takes priority over extracted badge.
+              // Extracted-but-not-failed schemas remain locked (can't re-select).
+              const isLocked = isFailed ? false : (alreadyExtracted || !!inProgress)
 
               return (
                 <div
                   key={k}
                   className={`flex items-start gap-3 px-4 py-3 border-b border-gray-100 transition-colors ${
-                    isLocked
-                      ? 'bg-gray-50 cursor-default'
-                      : checked
-                        ? 'bg-blue-50 border-l-2 border-l-blue-500 cursor-pointer'
-                        : 'hover:bg-gray-50 cursor-pointer'
+                    isFailed
+                      ? checked
+                        ? 'bg-red-50 border-l-2 border-l-red-400 cursor-pointer'
+                        : 'bg-red-50/50 cursor-pointer hover:bg-red-50'
+                      : isLocked
+                        ? 'bg-gray-50 cursor-default'
+                        : checked
+                          ? 'bg-blue-50 border-l-2 border-l-blue-500 cursor-pointer'
+                          : 'hover:bg-gray-50 cursor-pointer'
                   }`}
                   onClick={() => { if (!isLocked) toggle(s) }}
                 >
                   {/* Left icon */}
-                  {alreadyExtracted ? (
+                  {isFailed ? (
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggle(s)}
+                      onClick={e => e.stopPropagation()}
+                      className="mt-0.5 rounded accent-red-500"
+                    />
+                  ) : alreadyExtracted ? (
                     <svg className="mt-0.5 w-4 h-4 text-green-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/>
                     </svg>
@@ -361,19 +377,29 @@ export default function MigrationSelectPage() {
                   )}
 
                   <div className="min-w-0 flex-1">
-                    <div className={`text-xs font-mono truncate ${isLocked ? 'text-gray-500' : 'text-blue-700'}`}>
+                    <div className={`text-xs font-mono truncate ${isLocked ? 'text-gray-500' : isFailed ? 'text-red-700' : 'text-blue-700'}`}>
                       {s.namespace}:{s.name}
                     </div>
                     <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                       {s.label && <span className="text-xs text-gray-400 truncate">{s.label}</span>}
 
-                      {alreadyExtracted && (
+                      {!isFailed && alreadyExtracted && (
                         <span className="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-700 font-medium shrink-0">
                           Extracted — enriched JSON ready
                         </span>
                       )}
 
-                      {inProgress && (
+                      {isFailed && (
+                        <span
+                          className="text-xs px-1.5 py-0.5 rounded font-medium shrink-0 bg-red-50 text-red-600"
+                          title={inProgress?.error_message ?? undefined}
+                        >
+                          Failed: {inProgress?.current_step ?? `step ${inProgress?.current_step_order}`}
+                          {inProgress?.error_message ? ` — ${inProgress.error_message.slice(0, 60)}${inProgress.error_message.length > 60 ? '…' : ''}` : ''}
+                        </span>
+                      )}
+
+                      {!isFailed && inProgress && (
                         <span className={`text-xs px-1.5 py-0.5 rounded font-medium shrink-0 ${
                           inProgress.status === 'FAILED' ? 'bg-red-50 text-red-600' : 'bg-amber-50 text-amber-600'
                         }`}>
