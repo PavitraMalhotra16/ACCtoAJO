@@ -20,5 +20,5 @@ Get-CimInstance Win32_Process |
 Start-Sleep -Milliseconds 800
 
 Set-Location $frontend
-Write-Host "Frontend (Vite) starting — proxies /api to the backend (see vite.config.ts)."
+Write-Host "Frontend (Vite) starting - proxies /api to the backend (see vite.config.ts)."
 npm run dev
