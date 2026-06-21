@@ -149,7 +149,7 @@ def build_schema_inventory_envelope(session_token: str, security_token: str) -> 
         "<urn:ExecuteQuery>"
         f"<urn:sessiontoken>{_xml_escape(session_token)}</urn:sessiontoken>"
         "<urn:entity>"
-        '<queryDef schema="xtk:schema" operation="select" lineCount="500" startLine="0">'
+        '<queryDef schema="xtk:schema" operation="select" lineCount="9999">'
         "<select>"
         '<node expr="@namespace"/>'
         '<node expr="@name"/>'
@@ -208,7 +208,7 @@ def build_list_schemas_envelope(session_token: str, security_token: str) -> byte
         "<urn:ExecuteQuery>"
         f"<urn:sessiontoken>{_xml_escape(session_token)}</urn:sessiontoken>"
         "<urn:entity>"
-        '<queryDef schema="xtk:schema" operation="select" lineCount="200" startLine="0">'
+        '<queryDef schema="xtk:schema" operation="select" lineCount="9999">'
         "<select>"
         '<node expr="@namespace"/>'
         '<node expr="@name"/>'

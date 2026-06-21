@@ -5,8 +5,6 @@ import { startConversion, startMigration, getExtractedSchemas, getIncompleteSche
 
 interface SchemaEntry { namespace: string; name: string; label: string }
 
-const EXCLUDED_NAMESPACES = new Set(['crm', 'ncm', 'nms', 'xtk', 'nl'])
-
 interface Attribute {
   name: string
   type: string
@@ -150,11 +148,11 @@ export default function MigrationSelectPage() {
   const [search, setSearch]     = useState('')
   const [starting, setStarting] = useState(false)
 
-  const [details, setDetails]   = useState<Record<string, SchemaDetail | null>>({})
+  const [details, setDetails]         = useState<Record<string, SchemaDetail | null>>({})
   const [loadingDetail, setLoadingDetail] = useState<Set<string>>(new Set())
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  const [extracted, setExtracted] = useState<Set<string>>(new Set())
-  const [incomplete, setIncomplete] = useState<Record<string, IncompleteSchema>>({})
+  const [expanded, setExpanded]       = useState<Set<string>>(new Set())
+  const [extracted, setExtracted]     = useState<Set<string>>(new Set())
+  const [incomplete, setIncomplete]   = useState<Record<string, IncompleteSchema>>({})
 
   useEffect(() => {
     Promise.all([
@@ -163,10 +161,7 @@ export default function MigrationSelectPage() {
       getIncompleteSchemas(),
     ])
       .then(([schemasData, extractedData, incompleteData]) => {
-        const allSchemas = (schemasData.schemas ?? []).filter(
-          s => !EXCLUDED_NAMESPACES.has(s.namespace.toLowerCase())
-        )
-        setSchemas(allSchemas)
+        setSchemas(schemasData.schemas ?? [])
         setExtracted(new Set(extractedData.extracted))
 
         const incompleteMap: Record<string, IncompleteSchema> = {}

@@ -164,3 +164,12 @@ async def get_db():
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Add columns introduced after initial table creation (create_all won't ALTER existing tables)
+        for stmt in [
+            "ALTER TABLE destination_connections ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(255)",
+            "ALTER TABLE converted_schemas ADD COLUMN IF NOT EXISTS enriched_json TEXT",
+        ]:
+            try:
+                await conn.execute(__import__("sqlalchemy").text(stmt))
+            except Exception:
+                pass

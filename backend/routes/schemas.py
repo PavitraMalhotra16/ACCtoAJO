@@ -12,9 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import SourceConnection, get_db
 from core.security import get_login_from_cookie
-from services.acc_soap import build_list_schemas_envelope, parse_schemas, parse_fault
-from services.schema_inspector import parse_schema_to_xdm
-from services.acc_soap import build_srcschema_get_envelope
+from services.acc_soap import build_list_schemas_envelope, build_srcschema_get_envelope, parse_schemas, parse_fault
+from services.schema_preview import parse_schema_preview
 
 log = logging.getLogger("acc_backend.schemas")
 router = APIRouter()
@@ -62,6 +61,9 @@ async def list_schemas(
         "wpa", "sup", "temp", "ghost",        # misc system
         "nav", "acs", "fda",                  # connectors / FDA
     }
+    if resp.status_code == 403 or "Session has expired" in resp.text:
+        raise HTTPException(401, "ACC session expired. Please log in again.")
+
     all_schemas = parse_schemas(resp.text)
     schemas = [s for s in all_schemas if s.get("namespace", "").lower() not in SYSTEM_NAMESPACES]
     if not schemas:
@@ -96,7 +98,7 @@ async def inspect_schema(
     if fault:
         raise HTTPException(400, fault)
 
-    parsed = parse_schema_to_xdm(resp.text, namespace, name)
+    parsed = parse_schema_preview(resp.text, namespace, name)
     if not parsed:
         raise HTTPException(404, f"Schema {namespace}:{name} not found or empty")
     return parsed

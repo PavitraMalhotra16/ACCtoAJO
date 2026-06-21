@@ -100,9 +100,10 @@ async def run_schema(
                         )
 
                 except Exception as exc:
-                    log.error("Schema %s failed at %s: %s", schema_name, step.name, exc)
+                    log.exception("Schema %s failed at %s: %s", schema_name, step.name, exc)
+                    error_msg = str(exc) or f"{type(exc).__name__} (no message)"
                     await _update_item(
-                        item_id, "FAILED", step.name, step.order, error=str(exc)
+                        item_id, "FAILED", step.name, step.order, error=error_msg
                     )
                     return
 
