@@ -6,6 +6,7 @@ export interface MigrationSchemaItem {
   current_step_order: number
   identity_is_primary: boolean | null
   error_message: string | null
+  warnings?: string[]
   created_at: string
   completed_at: string | null
 }
@@ -38,15 +39,20 @@ export interface ExtractionJob {
 }
 
 async function _safeError(res: Response, fallback: string): Promise<never> {
-  try {
-    const e = await res.json()
-    throw new Error(e.detail || fallback)
-  } catch {
-    if (res.status === 502 || res.status === 503 || res.status === 504 || res.status === 500) {
-      throw new Error('Backend server is not running — please start it first')
-    }
-    throw new Error(fallback)
+  // Read the body once, then try to pull a JSON `detail`, else use raw text.
+  let raw = ''
+  try { raw = await res.text() } catch { /* ignore */ }
+  let detail = ''
+  if (raw) {
+    try { detail = JSON.parse(raw)?.detail ?? '' } catch { detail = raw }
   }
+  detail = (detail || '').toString().trim().slice(0, 400)
+  // A 5xx means the backend IS reachable but errored — surface the real reason,
+  // don't claim the server is down (only a network failure means that).
+  if (res.status >= 500) {
+    throw new Error(`Server error ${res.status}: ${detail || fallback}`)
+  }
+  throw new Error(detail || fallback)
 }
 
 export async function startConversion(
@@ -74,6 +80,16 @@ export async function getExtractedSchemas(): Promise<{ extracted: string[] }> {
     return res.json()
   } catch {
     return { extracted: [] }
+  }
+}
+
+export async function getPushedSchemas(): Promise<{ schemas: string[] }> {
+  try {
+    const res = await fetch('/api/migrate/completed', { credentials: 'include' })
+    if (!res.ok) return { schemas: [] }
+    return res.json()
+  } catch {
+    return { schemas: [] }
   }
 }
 

@@ -1,159 +1,166 @@
 import asyncio
-import json
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
+
+from pipeline_steps import PipelineStep
+
+
+# ── _run_steps ───────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_run_steps_success_and_snapshot():
+    from pipeline import runner
+    updates = []
+
+    async def fake_update(item_id, status, step_name, step_order, **kw):
+        updates.append((status, step_name, kw.get("current_snapshot") is not None))
+
+    async def fake_load(path):
+        async def handler(ctx, data):
+            data["ran"] = data.get("ran", 0) + 1
+            return data
+        return handler
+
+    steps = [PipelineStep("A", "A", "h.a", 1), PipelineStep("B", "B", "h.b", 2)]
+    with patch.object(runner, "_update_item", side_effect=fake_update), \
+         patch.object(runner, "_load_handler", side_effect=fake_load):
+        ok, data = await runner._run_steps("item", {"schema_name": "s"}, steps, {}, 0)
+
+    assert ok is True
+    assert data["ran"] == 2
+    assert ("RUNNING", "A", False) in updates  # step start
+    assert ("RUNNING", "A", True) in updates   # post-step snapshot
 
 
 @pytest.mark.asyncio
-async def test_run_schema_success():
-    completed_statuses = []
-
-    async def fake_update(item_id, status, step_name, step_order, error=None,
-                          identity_is_primary=None, current_snapshot=None):
-        completed_statuses.append((status, step_name))
-
-    async def fake_write_enriched(converted_schema_id, payload):
-        pass
-
-    with patch("pipeline.runner._update_item", side_effect=fake_update), \
-         patch("pipeline.runner._write_enriched_json", side_effect=fake_write_enriched), \
-         patch("pipeline.handlers.AsyncSessionLocal") as mock_session_cls:
-
-        mock_session = AsyncMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=False)
-        raw_data = {
-            "source": {"fullName": "cus:test", "name": "test"},
-            "schema": {"label": "Test", "description": ""},
-            "rootElement": {"name": "test"},
-            "attributes": [{"name": "id", "type": "int32"}],
-            "keys": {"autoPk": {"enabled": True, "field": "id"}, "primaryKeys": [], "uniqueKeys": []},
-            "linksAndJoins": [],
-        }
-        mock_schema = MagicMock()
-        mock_schema.raw_json = json.dumps(raw_data)
-        mock_result = MagicMock()
-        mock_result.scalar_one.return_value = mock_schema
-        mock_result.scalar_one_or_none.return_value = None
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_session_cls.return_value = mock_session
-
-        from pipeline.runner import run_schema
-        job_sem = asyncio.Semaphore(3)
-
-        with patch("pipeline.handlers.fetch_tenant_id", new=AsyncMock(
-            side_effect=lambda ctx, data: {**data, "tenantId": "_test"}
-        )):
-            await run_schema(
-                item_id="item-1",
-                login_id="user1",
-                schema_name="cus:test",
-                converted_schema_id="schema-id-1",
-                org_id="ORG@AdobeOrg",
-                job_sem=job_sem,
-            )
-
-    assert any(s == "COMPLETED" for s, _ in completed_statuses)
-
-
-@pytest.mark.asyncio
-async def test_run_schema_failure_at_step():
+async def test_run_steps_failure_marks_failed():
+    from pipeline import runner
     statuses = []
 
-    async def fake_update(item_id, status, step_name, step_order, error=None,
-                          identity_is_primary=None, current_snapshot=None):
+    async def fake_update(item_id, status, step_name, step_order, error=None, **kw):
         statuses.append((status, step_name, error))
 
-    async def bad_map_types(ctx, data):
-        raise ValueError("type mapping exploded")
+    async def fake_load(path):
+        async def boom(ctx, data):
+            raise ValueError("kaboom")
+        return boom
 
-    with patch("pipeline.runner._update_item", side_effect=fake_update), \
-         patch("pipeline.handlers.map_types", side_effect=bad_map_types), \
-         patch("pipeline.handlers.AsyncSessionLocal") as mock_session_cls:
+    steps = [PipelineStep("X", "X", "h.x", 1)]
+    with patch.object(runner, "_update_item", side_effect=fake_update), \
+         patch.object(runner, "_load_handler", side_effect=fake_load):
+        ok, data = await runner._run_steps("item", {"schema_name": "s"}, steps, {}, 0)
 
-        mock_session = AsyncMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=False)
-        raw_data = {"source": {"fullName": "cus:test"}, "attributes": []}
-        mock_schema = MagicMock()
-        mock_schema.raw_json = json.dumps(raw_data)
-        mock_result = MagicMock()
-        mock_result.scalar_one.return_value = mock_schema
-        mock_result.scalar_one_or_none.return_value = None
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_session_cls.return_value = mock_session
-
-        from pipeline.runner import run_schema
-        job_sem = asyncio.Semaphore(3)
-        await run_schema(
-            item_id="item-2",
-            login_id="user1",
-            schema_name="cus:test",
-            converted_schema_id="schema-id-2",
-            org_id="ORG@AdobeOrg",
-            job_sem=job_sem,
-        )
-
-    failed = [(s, n, e) for s, n, e in statuses if s == "FAILED"]
-    assert len(failed) == 1
-    assert failed[0][1] == "MAP_TYPES"
-    assert "type mapping exploded" in failed[0][2]
+    assert ok is False
+    failed = [s for s in statuses if s[0] == "FAILED"]
+    assert failed and failed[0][1] == "X" and "kaboom" in failed[0][2]
 
 
 @pytest.mark.asyncio
-async def test_run_schema_resumes_from_snapshot():
-    completed_statuses = []
+async def test_run_steps_resume_skips_completed():
+    from pipeline import runner
 
-    async def fake_update(item_id, status, step_name, step_order, error=None,
-                          identity_is_primary=None, current_snapshot=None):
-        completed_statuses.append((status, step_name))
+    async def fake_load(path):
+        async def handler(ctx, data):
+            data.setdefault("ran", []).append(path)
+            return data
+        return handler
 
-    async def fake_write_enriched(converted_schema_id, payload):
-        pass
+    steps = [
+        PipelineStep("A", "A", "h.a", 1),
+        PipelineStep("B", "B", "h.b", 2),
+        PipelineStep("C", "C", "h.c", 3),
+    ]
+    with patch.object(runner, "_update_item", new=AsyncMock()), \
+         patch.object(runner, "_load_handler", side_effect=fake_load):
+        ok, data = await runner._run_steps("item", {}, steps, {}, resume_from_step=2)
 
-    resume_data = {
-        "source": {"fullName": "cus:test", "name": "test"},
-        "schema": {"label": "Test", "description": ""},
-        "rootElement": {"name": "test"},
-        "attributes": [{"name": "id", "type": "int32"}],
-        "keys": {"autoPk": {"enabled": True, "field": "id"}, "primaryKeys": [], "uniqueKeys": []},
-        "linksAndJoins": [],
-        "xdmTypes": {"id": {"type": "integer"}},
-        "identityDecision": {"fieldPath": "/id", "isPrimary": False, "status": "resolved"},
-    }
+    assert ok is True
+    assert data["ran"] == ["h.c"]  # steps with order <= 2 are skipped
 
-    with patch("pipeline.runner._update_item", side_effect=fake_update), \
-         patch("pipeline.runner._write_enriched_json", side_effect=fake_write_enriched), \
-         patch("pipeline.handlers.AsyncSessionLocal") as mock_session_cls:
 
-        mock_session = AsyncMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=False)
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = None
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_session_cls.return_value = mock_session
+@pytest.mark.asyncio
+async def test_build_payload_triggers_enriched_write():
+    from pipeline import runner
+    writes = []
 
-        from pipeline.runner import run_schema
-        job_sem = asyncio.Semaphore(3)
+    async def fake_write(cid, payload):
+        writes.append((cid, payload))
 
-        with patch("pipeline.handlers.fetch_tenant_id", new=AsyncMock(
-            side_effect=lambda ctx, data: {**data, "tenantId": "_test"}
-        )):
-            await run_schema(
-                item_id="item-3",
-                login_id="user1",
-                schema_name="cus:test",
-                converted_schema_id="schema-id-3",
-                org_id="ORG@AdobeOrg",
-                job_sem=job_sem,
-                resume_from_step=3,
-                resume_data=resume_data,
-            )
+    async def fake_load(path):
+        async def handler(ctx, data):
+            data["ajoPayload"] = {"title": "t"}
+            return data
+        return handler
 
-    # LOAD_JSON (step 1), MAP_TYPES (step 2), RESOLVE_IDENTITY (step 3) must be skipped
-    step_names_run = [name for _, name in completed_statuses]
-    assert "LOAD_JSON" not in step_names_run
-    assert "MAP_TYPES" not in step_names_run
-    assert "RESOLVE_IDENTITY" not in step_names_run
-    assert any(s == "COMPLETED" for s, _ in completed_statuses)
+    steps = [PipelineStep("BUILD_PAYLOAD", "b", "h.bp", 5)]
+    with patch.object(runner, "_update_item", new=AsyncMock()), \
+         patch.object(runner, "_load_handler", side_effect=fake_load), \
+         patch.object(runner, "_write_enriched_json", side_effect=fake_write):
+        await runner._run_steps("item", {"converted_schema_id": "cid"}, steps, {}, 0)
+
+    assert writes == [("cid", {"title": "t"})]
+
+
+# ── run_schema (PASS 1) ──────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_run_schema_returns_ctx_and_data():
+    from pipeline import runner
+
+    async def fake_run_steps(item_id, ctx, steps, data, resume):
+        return True, {"done": True}
+
+    sem = asyncio.Semaphore(1)
+    with patch.object(runner, "_run_steps", side_effect=fake_run_steps):
+        ok, ctx, data = await runner.run_schema("i", "u", "cus:x", "cid", "O@AdobeOrg", sem)
+
+    assert ok is True
+    assert ctx["schema_name"] == "cus:x"
+    assert ctx["converted_schema_id"] == "cid"
+    assert data["done"] is True
+
+
+# ── run_schema_phase2 (PASS 2 — final state) ─────────────────────────────────
+
+async def _run_phase2(monkey_data, *, ok=True):
+    from pipeline import runner
+    captured = {}
+
+    async def fake_update(item_id, status, step_name, step_order, **kw):
+        captured["status"] = status
+        captured["step"] = step_name
+
+    async def fake_run_steps(item_id, ctx, steps, data, resume):
+        return ok, monkey_data
+
+    update_mock = AsyncMock(side_effect=fake_update)
+    with patch.object(runner, "_update_item", new=update_mock), \
+         patch.object(runner, "_run_steps", side_effect=fake_run_steps):
+        await runner.run_schema_phase2("item", {"schema_name": "s"}, {})
+    return captured, update_mock
+
+
+@pytest.mark.asyncio
+async def test_phase2_already_exists():
+    captured, _ = await _run_phase2({"schemaExisted": True, "changesMade": 0, "relationshipsCreated": 0})
+    assert captured["status"] == "COMPLETED"
+    assert captured["step"] == "ALREADY_EXISTS"
+
+
+@pytest.mark.asyncio
+async def test_phase2_pushed_when_relationship_added():
+    captured, _ = await _run_phase2({"schemaExisted": True, "changesMade": 0, "relationshipsCreated": 1})
+    assert captured["status"] == "COMPLETED"
+    assert captured["step"] == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_phase2_new_schema_completed():
+    captured, _ = await _run_phase2({"schemaExisted": False, "changesMade": 1, "relationshipsCreated": 0})
+    assert captured["step"] == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_phase2_skips_when_pass2_failed():
+    _, update_mock = await _run_phase2({}, ok=False)
+    update_mock.assert_not_called()  # FAILED was already set inside _run_steps (mocked away)

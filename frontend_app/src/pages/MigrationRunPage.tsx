@@ -12,15 +12,24 @@ import {
   type MigrationSchemaItem,
 } from '../api/migration'
 
-// Labels must match pipeline_steps.py — Phase 2 runs steps 1-5 only
+// Labels must match pipeline_steps.py — steps 1-5 enrich, 6-14 push to AJO
 const STEP_LABELS: Record<string, string> = {
   LOAD_JSON: 'Loading schema',
   MAP_TYPES: 'Mapping types',
   RESOLVE_IDENTITY: 'Resolving identity',
   FETCH_TENANT_ID: 'Fetching tenant ID',
   BUILD_PAYLOAD: 'Building enriched JSON',
+  NORMALIZE_INPUT: 'Reading enriched JSON',
+  DUPLICATE_CHECK: 'Checking AEP registry',
+  CREATE_SCHEMA: 'Creating schema in AEP',
+  PRIMARY_KEY_DESCRIPTOR: 'Primary-key descriptor',
+  VERSION_DESCRIPTOR: 'Version descriptor',
+  TIMESTAMP_DESCRIPTOR: 'Timestamp descriptor',
+  IDENTITY_DESCRIPTOR: 'Identity descriptor',
+  RELATIONSHIP_DESCRIPTORS: 'Wiring relationships',
+  VERIFY: 'Verifying in AEP',
 }
-const TOTAL_STEPS = 5
+const TOTAL_STEPS = 14
 
 type Phase = 'extracting' | 'migrating' | 'done'
 
@@ -74,16 +83,37 @@ function InProgressCard({ s }: { s: MigrationSchemaItem }) {
 
 function CompletedCard({ s }: { s: MigrationSchemaItem }) {
   const dur = duration(s.created_at!, s.completed_at)
+  const alreadyExisted = s.current_step === 'ALREADY_EXISTS'
+  const warnings = s.warnings ?? []
+  const borderColor = warnings.length ? 'border-amber-200' : alreadyExisted ? 'border-gray-200' : 'border-green-200'
   return (
-    <div className="bg-white border border-green-200 rounded-xl px-5 py-3.5 flex items-center gap-3">
-      <svg className="w-4 h-4 text-green-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/>
-      </svg>
-      <span className="font-mono text-sm text-gray-800 flex-1">{s.schema_name}</span>
-      <div className="flex items-center gap-2 text-xs">
-        <span className="px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">Enriched JSON ready</span>
-        {dur && <span className="text-gray-400">· {dur}</span>}
+    <div className={`bg-white border rounded-xl px-5 py-3.5 ${borderColor}`}>
+      <div className="flex items-center gap-3">
+        <svg className={`w-4 h-4 shrink-0 ${alreadyExisted ? 'text-gray-400' : 'text-green-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/>
+        </svg>
+        <span className="font-mono text-sm text-gray-800 flex-1">{s.schema_name}</span>
+        <div className="flex items-center gap-2 text-xs">
+          {warnings.length > 0 && (
+            <span className="px-2 py-0.5 rounded-full font-medium bg-amber-100 text-amber-700">
+              {warnings.length} warning{warnings.length > 1 ? 's' : ''}
+            </span>
+          )}
+          <span className={`px-2 py-0.5 rounded-full font-medium ${alreadyExisted ? 'bg-gray-100 text-gray-600' : 'bg-green-100 text-green-700'}`}>
+            {alreadyExisted ? 'Already in AJO — nothing to push' : 'Pushed to AJO'}
+          </span>
+          {dur && <span className="text-gray-400">· {dur}</span>}
+        </div>
       </div>
+      {warnings.length > 0 && (
+        <ul className="mt-2 pl-7 flex flex-col gap-1">
+          {warnings.map((w, i) => (
+            <li key={i} className="text-xs text-amber-600 flex gap-1.5">
+              <span className="shrink-0">⚠</span><span className="break-words">{w}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }
@@ -182,7 +212,7 @@ function MigrationDashboard({
     <div className="flex flex-col gap-6">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Schema extraction</h1>
+        <h1 className="text-2xl font-bold text-gray-900">Pushing schemas to AJO</h1>
         <p className="text-sm text-gray-400 mt-1">
           {startedAt && `Job started ${timeAgo(startedAt)} · `}
           {total} schemas
@@ -194,7 +224,7 @@ function MigrationDashboard({
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {[
           { label: 'Total', value: total, color: 'text-gray-900' },
-          { label: 'Extracted', value: completed.length, color: 'text-green-600' },
+          { label: 'Pushed', value: completed.length, color: 'text-green-600' },
           { label: 'In progress', value: inProgress.length, color: 'text-blue-600' },
           { label: 'Failed', value: failed.length, color: 'text-red-600' },
         ].map(card => (
@@ -248,7 +278,7 @@ function MigrationDashboard({
       {/* All done */}
       {allDone && failed.length === 0 && (
         <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-center text-green-700 font-medium text-sm">
-          All {completed.length} schemas extracted — enriched JSON ready
+          All {completed.length} schemas pushed to AJO
         </div>
       )}
     </div>
@@ -436,7 +466,7 @@ export default function MigrationRunPage() {
                 }`}>
                   {done && <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/></svg>}
                   {active && <svg className="animate-spin w-3 h-3" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>}
-                  {p === 'extracting' ? 'Extract' : p === 'migrating' ? 'Enrich JSON' : 'Done'}
+                  {p === 'extracting' ? 'Extract' : p === 'migrating' ? 'Push to AJO' : 'Done'}
                 </div>
                 {i < 2 && <div className={`w-6 h-px ${i < phaseLabels.indexOf(phase) ? 'bg-green-300' : 'bg-gray-200'}`} />}
               </div>
@@ -460,8 +490,8 @@ export default function MigrationRunPage() {
             <div>
               <p className={`font-semibold text-base ${migrateJob.failed === 0 ? 'text-green-700' : 'text-yellow-700'}`}>
                 {migrateJob.failed === 0
-                  ? `Extraction complete — all ${migrateJob.completed} schemas extracted, enriched JSON ready`
-                  : `Extraction finished — ${migrateJob.completed} extracted, ${migrateJob.failed} failed`}
+                  ? `Migration complete — all ${migrateJob.completed} schemas pushed to AJO`
+                  : `Migration finished — ${migrateJob.completed} pushed, ${migrateJob.failed} failed`}
               </p>
               <p className="text-xs text-gray-400 mt-0.5">Final results shown below</p>
             </div>

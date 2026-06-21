@@ -13,6 +13,10 @@ log = logging.getLogger("acc_backend.pipeline.runner")
 
 _GLOBAL_SEM = asyncio.Semaphore(10)
 
+_PHASE1_STEPS = [s for s in PIPELINE_STEPS if s.phase == 1]
+_PHASE2_STEPS = [s for s in PIPELINE_STEPS if s.phase == 2]
+_TOTAL_STEPS = len(PIPELINE_STEPS)
+
 
 async def _load_handler(dotted_path: str):
     module_path, fn_name = dotted_path.rsplit(".", 1)
@@ -59,6 +63,49 @@ async def _write_enriched_json(converted_schema_id: str, payload: dict) -> None:
         await db.commit()
 
 
+async def _run_steps(
+    item_id: str,
+    ctx: dict,
+    steps: list,
+    data: dict,
+    resume_from_step: int,
+) -> tuple[bool, dict]:
+    """Run a contiguous set of pipeline steps. Returns (ok, data); on failure the
+    item is marked FAILED and ok=False."""
+    for step in steps:
+        if step.order <= resume_from_step:
+            continue
+
+        await _update_item(item_id, "RUNNING", step.name, step.order)
+        try:
+            handler = await _load_handler(step.handler)
+            data = await handler(ctx, data)
+        except Exception as exc:
+            log.exception("Schema %s failed at %s: %s", ctx.get("schema_name"), step.name, exc)
+            error_msg = str(exc) or f"{type(exc).__name__} (no message)"
+            await _update_item(item_id, "FAILED", step.name, step.order, error=error_msg)
+            return False, data
+
+        await _update_item(
+            item_id, "RUNNING", step.name, step.order,
+            current_snapshot=json.dumps(data, default=str),
+        )
+
+        if step.name == "RESOLVE_IDENTITY":
+            identity = data.get("identityDecision", {})
+            await _update_item(
+                item_id, "RUNNING", step.name, step.order,
+                identity_is_primary=identity.get("isPrimary"),
+            )
+
+        # Persist the enriched JSON as soon as it's built, so it's the durable
+        # push input for the steps that follow (and survives a failed push).
+        if step.name == "BUILD_PAYLOAD":
+            await _write_enriched_json(ctx["converted_schema_id"], data.get("ajoPayload", data))
+
+    return True, data
+
+
 async def run_schema(
     item_id: str,
     login_id: str,
@@ -68,7 +115,9 @@ async def run_schema(
     job_sem: asyncio.Semaphore,
     resume_from_step: int = 0,
     resume_data: dict | None = None,
-) -> None:
+) -> tuple[bool, dict, dict]:
+    """PASS 1 — build the enriched JSON, create the schema and its descriptors.
+    Returns (ok, ctx, data); the schema is NOT marked COMPLETED until PASS 2."""
     async with _GLOBAL_SEM:
         async with job_sem:
             ctx = {
@@ -78,39 +127,27 @@ async def run_schema(
                 "org_id": org_id,
             }
             data: dict = resume_data or {}
+            ok, data = await _run_steps(item_id, ctx, _PHASE1_STEPS, data, resume_from_step)
+            return ok, ctx, data
 
-            for step in PIPELINE_STEPS:
-                if step.order <= resume_from_step:
-                    continue
 
-                await _update_item(item_id, "RUNNING", step.name, step.order)
-                try:
-                    handler = await _load_handler(step.handler)
-                    data = await handler(ctx, data)
-                    await _update_item(
-                        item_id, "RUNNING", step.name, step.order,
-                        current_snapshot=json.dumps(data),
-                    )
+async def run_schema_phase2(
+    item_id: str,
+    ctx: dict,
+    data: dict,
+    resume_from_step: int = 0,
+) -> None:
+    """PASS 2 — wire relationships, verify, then mark the schema's final state."""
+    ok, data = await _run_steps(item_id, ctx, _PHASE2_STEPS, data, resume_from_step)
+    if not ok:
+        return
 
-                    if step.name == "RESOLVE_IDENTITY":
-                        identity = data.get("identityDecision", {})
-                        await _update_item(
-                            item_id, "RUNNING", step.name, step.order,
-                            identity_is_primary=identity.get("isPrimary"),
-                        )
-
-                except Exception as exc:
-                    log.exception("Schema %s failed at %s: %s", schema_name, step.name, exc)
-                    error_msg = str(exc) or f"{type(exc).__name__} (no message)"
-                    await _update_item(
-                        item_id, "FAILED", step.name, step.order, error=error_msg
-                    )
-                    return
-
-            ajo_payload = data.get("ajoPayload", data)
-            await _write_enriched_json(converted_schema_id, ajo_payload)
-            await _update_item(item_id, "COMPLETED", "COMPLETED", len(PIPELINE_STEPS))
-            log.info("Schema %s migrated successfully", schema_name)
+    any_changes = data.get("changesMade", 0) + data.get("relationshipsCreated", 0)
+    # Schema + all its pieces were already in AEP and nothing was added → inform
+    # the user it already exists; otherwise it was created or topped-up.
+    final_step = "ALREADY_EXISTS" if (data.get("schemaExisted") and any_changes == 0) else "COMPLETED"
+    await _update_item(item_id, "COMPLETED", final_step, _TOTAL_STEPS)
+    log.info("Schema %s push complete (%s)", ctx.get("schema_name"), final_step)
 
 
 async def run_migration_job(
@@ -120,7 +157,9 @@ async def run_migration_job(
     org_id: str,
 ) -> None:
     job_sem = asyncio.Semaphore(3)
-    tasks = [
+
+    # PASS 1 — per-schema, concurrent: create schemas + their own descriptors.
+    pass1_tasks = [
         asyncio.create_task(
             run_schema(
                 item_id=item["id"],
@@ -135,4 +174,15 @@ async def run_migration_job(
         )
         for item in schema_items
     ]
-    await asyncio.gather(*tasks, return_exceptions=True)
+    pass1_results = await asyncio.gather(*pass1_tasks, return_exceptions=True)
+
+    # PASS 2 — relationships + verify. Run sequentially so concurrent schemas
+    # don't race to create the same relationship descriptor.
+    for item, result in zip(schema_items, pass1_results):
+        if isinstance(result, BaseException):
+            log.error("Schema %s crashed in PASS 1: %s", item["schema_name"], result)
+            continue
+        ok, ctx, data = result
+        if not ok:
+            continue
+        await run_schema_phase2(item["id"], ctx, data, item.get("resume_from_step", 0))

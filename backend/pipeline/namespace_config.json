@@ -1,0 +1,23 @@
+{
+  "_comment": "Identity-namespace resolution for the optional identity descriptor (spec §8a). Keys are normalized field names (lowercased, stripped of underscores/spaces). Only fields that resolve to a namespace listed in personNamespaces get an identity descriptor — relational schemas otherwise rely on the primary key.",
+  "namespaceMapping": {
+    "email": "Email",
+    "emailaddress": "Email",
+    "phone": "Phone",
+    "phonenumber": "Phone",
+    "mobilephone": "Phone",
+    "mobilenumber": "Phone",
+    "customerid": "CRMID",
+    "crmid": "CRMID",
+    "loyaltyid": "LoyaltyId"
+  },
+  "personNamespaces": ["Email", "Phone", "CRMID", "LoyaltyId", "CustomerID"],
+  "idTypeByNamespace": {
+    "Email": "EMAIL",
+    "Phone": "PHONE",
+    "CRMID": "CROSS_DEVICE",
+    "CustomerID": "CROSS_DEVICE",
+    "LoyaltyId": "CROSS_DEVICE"
+  },
+  "defaultIdType": "CROSS_DEVICE"
+}

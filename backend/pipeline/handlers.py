@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+import re
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -8,6 +10,7 @@ from sqlalchemy.exc import ProgrammingError
 
 from db import AsyncSessionLocal, ConvertedSchema, DestinationConnection, ensure_schema_columns
 from core.security import decrypt, encrypt
+from pipeline import aep_client
 
 IMS_TOKEN_URL = "https://ims-na1.adobelogin.com/ims/token/v3"
 IMS_SCOPES = "AdobeID,openid,read_organizations,adobeio_api,additional_details.projectedProductContext"
@@ -468,16 +471,16 @@ async def build_payload(ctx: dict, data: dict) -> dict:
     schema_name = ctx.get("schema_name", "")
     namespace = schema_name.split(":")[0] if ":" in schema_name else ""
 
-    # A. title — always prefixed with namespace so nms:auditHistory ≠ hdbk:auditHistory
+    # A. title — the ACC namespace:name (unique dedup key + relationship-resolution
+    #    key; spec §4). Fallbacks keep a sensible value if schema_name is absent.
     base_title = (
         schema_meta.get("label")
         or root.get("label")
         or root.get("sqlTable")
         or source.get("fullName")
         or source_name
-        or schema_name
     )
-    title = f"{namespace}:{base_title}" if namespace else base_title
+    title = schema_name or (f"{namespace}:{base_title}" if namespace else base_title)
 
     # B. description
     description = (
@@ -537,6 +540,584 @@ async def build_payload(ctx: dict, data: dict) -> dict:
         "Built payload for %s: behavior=%s primaryKey=%s identityField=%s",
         source_name, behavior, primary_key, identity_field,
     )
+    return data
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Phase 3 — push the relational schema into AEP / AJO (spec §4–§11)
+#
+# Every push handler reconciles desired state (the enriched JSON) against the
+# live Schema Registry: it creates only what is missing, so reruns/resumes are
+# idempotent and no extra state is persisted. The AEP schema *title* is the ACC
+# `namespace:name`, which is unique and is also how relationship targets are
+# resolved back to their $id.
+# ════════════════════════════════════════════════════════════════════════════
+
+_NAMESPACE_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "namespace_config.json")
+
+
+def _load_namespace_config() -> dict:
+    try:
+        with open(_NAMESPACE_CONFIG_PATH, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        log.warning("namespace_config.json missing/invalid — identity descriptors disabled")
+        return {"namespaceMapping": {}, "personNamespaces": [], "idTypeByNamespace": {}, "defaultIdType": "CROSS_DEVICE"}
+
+
+_NAMESPACE_CONFIG = _load_namespace_config()
+
+
+# ── auth / headers ───────────────────────────────────────────────────────────
+async def _resolve_aep_auth(ctx: dict) -> dict:
+    """Load AJO destination creds + a valid (decrypted, refreshed) access token."""
+    org_id = ctx["org_id"]
+    async with AsyncSessionLocal() as db:
+        dest = (
+            await db.execute(
+                select(DestinationConnection).where(DestinationConnection.org_id == org_id)
+            )
+        ).scalar_one_or_none()
+        if not dest or not dest.authenticated:
+            raise ValueError("AJO is not connected — connect AJO before pushing schemas")
+        token = await get_valid_access_token(dest, db)
+        return {
+            "access_token": token,
+            "api_key": dest.client_id,
+            "org_id": dest.org_id,
+            "sandbox": dest.sandbox_name,
+            "tenant_id": dest.tenant_id,
+        }
+
+
+def _headers(auth: dict, content_type: bool = True) -> dict:
+    h = {
+        "Authorization": f"Bearer {auth['access_token']}",
+        "x-api-key": auth.get("api_key") or "",
+        "x-gw-ims-org-id": auth["org_id"],
+        "x-sandbox-name": auth.get("sandbox") or "prod",
+    }
+    if content_type:
+        h["Content-Type"] = "application/json"
+    return h
+
+
+# ── small builders / matchers ────────────────────────────────────────────────
+def _push_title(ctx: dict, payload: dict) -> str:
+    # Authoritative title = ACC namespace:name (spec §4 dedup + relationship key).
+    return ctx.get("schema_name") or payload.get("title") or ""
+
+
+def _field_to_property(field: dict, is_primary: bool) -> dict:
+    prop: dict = {"title": field.get("label") or field.get("name")}
+    if field.get("description"):
+        prop["description"] = field["description"]
+    prop["type"] = field.get("type", "string")
+    if field.get("format"):
+        prop["format"] = field["format"]
+    # Enforce non-empty primary-key strings (spec §4 example uses minLength: 1).
+    if is_primary and prop["type"] == "string":
+        prop["minLength"] = 1
+    return prop
+
+
+def _build_create_body(payload: dict, title: str) -> dict:
+    """Relational create body: meta:extends adhoc-v2 + direct customFields + allOf (spec §4)."""
+    primary_key = set(payload.get("primaryKey") or [])
+    properties: dict = {}
+    required: list[str] = []
+    for field in payload.get("fields", []):
+        name = field.get("name")
+        if not name:
+            continue
+        properties[name] = _field_to_property(field, name in primary_key)
+        if field.get("required"):
+            required.append(name)
+    custom_fields: dict = {"type": "object", "properties": properties}
+    if required:
+        custom_fields["required"] = required
+    body: dict = {
+        "title": title,
+        "type": "object",
+        "description": f"This table is about {title}",
+        "meta:extends": [aep_client.ADHOC_EXTENDS],
+        "definitions": {"customFields": custom_fields},
+        "allOf": [{"$ref": "#/definitions/customFields"}],
+    }
+    if payload.get("behavior") == "time-series":
+        body["meta:behaviorType"] = "time-series"
+    return body
+
+
+def _existing_property_names(schema_full: dict) -> set[str]:
+    names: set[str] = set()
+    for key in (schema_full.get("properties") or {}):
+        names.add(key)
+    defs = schema_full.get("definitions") or {}
+    custom = (defs.get("customFields") or {}).get("properties") or {}
+    for key in custom:
+        names.add(key)
+    return names
+
+
+def _existing_field_types(schema_full: dict) -> dict[str, tuple]:
+    """Map field name → (type, format) from a fetched schema, for type-diff warnings."""
+    out: dict[str, tuple] = {}
+
+    def ingest(props):
+        for name, spec in (props or {}).items():
+            if isinstance(spec, dict):
+                out[name] = (spec.get("type"), spec.get("format"))
+
+    ingest(schema_full.get("properties"))
+    defs = schema_full.get("definitions") or {}
+    ingest((defs.get("customFields") or {}).get("properties"))  # adhoc fields win
+    return out
+
+
+def _descriptors_for(descriptors: list[dict], schema_id: str) -> list[dict]:
+    return [d for d in descriptors if d.get("xdm:sourceSchema") == schema_id]
+
+
+def _has_descriptor(descriptors: list[dict], schema_id: str, dtype: str, source_property=None) -> bool:
+    for d in descriptors:
+        if d.get("xdm:sourceSchema") != schema_id or d.get("@type") != dtype:
+            continue
+        if source_property is None or d.get("xdm:sourceProperty") == source_property:
+            return True
+    return False
+
+
+def _has_relationship(descriptors: list[dict], source_id: str, source_property: str, dest_id: str) -> bool:
+    for d in descriptors:
+        if (
+            d.get("@type") == "xdm:descriptorRelationship"
+            and d.get("xdm:sourceSchema") == source_id
+            and d.get("xdm:sourceProperty") == source_property
+            and d.get("xdm:destinationSchema") == dest_id
+        ):
+            return True
+    return False
+
+
+async def _fetch_descriptors(client: httpx.AsyncClient, headers: dict, schema_id: str) -> list[dict]:
+    return _descriptors_for(await aep_client.list_tenant_descriptors(client, headers), schema_id)
+
+
+async def _create_descriptor(client: httpx.AsyncClient, headers: dict, body: dict) -> bool:
+    """Create a descriptor idempotently. GET /tenant/descriptors does not list
+    version/timestamp descriptors, so they can't be reliably pre-checked — instead
+    attempt the create and treat an 'already exists / only one allowed' 400 as a
+    no-op. Returns True if newly created, False if it already existed."""
+    try:
+        await aep_client.create_tenant_descriptor(client, headers, body)
+        return True
+    except RuntimeError as exc:
+        msg = str(exc).lower()
+        if "already exists" in msg or "only one" in msg:
+            log.info("Descriptor %s already present on %s — skipping",
+                     body.get("@type"), body.get("xdm:sourceSchema"))
+            return False
+        raise
+
+
+def _normalize_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def _resolve_person_namespace(field_name: str) -> str | None:
+    """Return the namespace code only if the field maps to a genuine person key (spec §8)."""
+    mapping = _NAMESPACE_CONFIG.get("namespaceMapping", {})
+    person = set(_NAMESPACE_CONFIG.get("personNamespaces", []))
+    ns = mapping.get(_normalize_name(field_name))
+    return ns if ns and ns in person else None
+
+
+def _normalize_cardinality(card: str | None) -> str:
+    """Map ACC cardinality forms to the accepted set: 1:1, 1:0, M:1, M:0 (spec §9)."""
+    c = (card or "").strip().lower()
+    if c in ("1:1", "one-to-one", "onetoone"):
+        return "1:1"
+    if c == "1:0":
+        return "1:0"
+    if c in ("m:0", "n:0"):
+        return "M:0"
+    return "M:1"  # foreign-key links (many source → one target) — the common case
+
+
+def _rel_source_property(foreign_key) -> str | None:
+    """Foreign keys must be root-level — a single path segment (spec §9)."""
+    if isinstance(foreign_key, list):
+        foreign_key = foreign_key[0] if foreign_key else None
+    if not foreign_key:
+        return None
+    fk = str(foreign_key).lstrip("/")
+    if "/" in fk:
+        return None
+    return f"/{fk}"
+
+
+# ── Step 6: NORMALIZE_INPUT ──────────────────────────────────────────────────
+async def normalize_input(ctx: dict, data: dict) -> dict:
+    """Read the enriched JSON from the DB, ensure it parses, use it as push input."""
+    payload = None
+    async with AsyncSessionLocal() as db:
+        row = (
+            await db.execute(
+                select(ConvertedSchema).where(ConvertedSchema.id == ctx["converted_schema_id"])
+            )
+        ).scalar_one_or_none()
+        enriched = row.enriched_json if row else None
+
+    if isinstance(enriched, dict):
+        payload = enriched
+    elif enriched:
+        try:
+            payload = json.loads(enriched)
+        except (json.JSONDecodeError, TypeError):
+            log.warning("enriched_json for %s was not valid JSON — falling back to in-memory payload",
+                        ctx.get("schema_name"))
+            payload = None
+
+    if payload is None:
+        payload = data.get("ajoPayload")
+    if not isinstance(payload, dict):
+        raise ValueError("No enriched JSON payload available to push")
+
+    data["ajoPayload"] = payload
+    data.setdefault("changesMade", 0)
+    data.setdefault("warnings", [])
+    return data
+
+
+# ── Step 7: DUPLICATE_CHECK (per-component reconcile starts here) ─────────────
+async def duplicate_check(ctx: dict, data: dict) -> dict:
+    payload = data["ajoPayload"]
+    title = _push_title(ctx, payload)
+    auth = await _resolve_aep_auth(ctx)
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        schemas = await aep_client.list_tenant_schemas(client, _headers(auth, content_type=False))
+
+    match = next((s for s in schemas if s.get("title") == title), None)
+    data["pushTitle"] = title
+    data.setdefault("changesMade", 0)
+    if match:
+        data["aepSchemaId"] = match.get("$id") or match.get("meta:altId")
+        data["schemaExisted"] = True
+        log.info("Schema %r already exists in registry (%s)", title, data["aepSchemaId"])
+    else:
+        data["aepSchemaId"] = None
+        data["schemaExisted"] = False
+    return data
+
+
+# ── Step 8: CREATE_SCHEMA (create, or PATCH missing fields if it exists) ──────
+async def create_schema(ctx: dict, data: dict) -> dict:
+    payload = data["ajoPayload"]
+    title = data.get("pushTitle") or _push_title(ctx, payload)
+    auth = await _resolve_aep_auth(ctx)
+    headers = _headers(auth)
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        if not data.get("aepSchemaId"):
+            body = _build_create_body(payload, title)
+            created = await aep_client.create_tenant_schema(client, headers, body)
+            schema_id = created.get("$id") or created.get("meta:altId")
+            if not schema_id:
+                raise ValueError(f"Create schema returned no $id: {created}")
+            data["aepSchemaId"] = schema_id
+            data["changesMade"] = data.get("changesMade", 0) + 1
+            log.info("Created schema %r → %s", title, schema_id)
+        else:
+            # Schema exists — add any columns present in the enriched JSON but
+            # missing from the live schema (spec: final state == enriched JSON).
+            schema_id = data["aepSchemaId"]
+            existing = await aep_client.get_tenant_schema(client, headers, schema_id)
+            existing_names = _existing_property_names(existing)
+            existing_types = _existing_field_types(existing)
+            warnings = data.setdefault("warnings", [])
+
+            # Behavior is fixed at creation and cannot be changed — flag a mismatch
+            # rather than silently diverging from the enriched JSON.
+            existing_behavior = "time-series" if existing.get("meta:behaviorType") == "time-series" else "record"
+            desired_behavior = payload.get("behavior", "record")
+            if existing_behavior != desired_behavior:
+                warnings.append(
+                    f"Behavior mismatch: AEP schema is '{existing_behavior}' but enriched JSON wants "
+                    f"'{desired_behavior}'. Behavior is fixed at creation and was left unchanged."
+                )
+
+            primary_key = set(payload.get("primaryKey") or [])
+            ops: list[dict] = []
+            for field in payload.get("fields", []):
+                name = field.get("name")
+                if not name:
+                    continue
+                if name not in existing_names:
+                    ops.append({
+                        "op": "add",
+                        "path": f"/definitions/customFields/properties/{name}",
+                        "value": _field_to_property(field, name in primary_key),
+                    })
+                    if field.get("required"):
+                        ops.append({"op": "add", "path": "/definitions/customFields/required/-", "value": name})
+                    continue
+                # Field already exists — we only add missing columns, never retype an
+                # existing one (a type change is rejected once data is ingested), so
+                # flag a type difference instead of silently leaving it.
+                desired_tf = (field.get("type"), field.get("format"))
+                existing_tf = existing_types.get(name)
+                if existing_tf and existing_tf[0] is not None and existing_tf != desired_tf:
+                    warnings.append(
+                        f"Field '{name}' type mismatch: AEP has {existing_tf[0]!r}"
+                        f"{'/' + existing_tf[1] if existing_tf[1] else ''}, enriched JSON wants "
+                        f"{desired_tf[0]!r}{'/' + desired_tf[1] if desired_tf[1] else ''}. Existing field left unchanged."
+                    )
+
+            prop_ops = [o for o in ops if "/properties/" in o["path"]]
+            if ops:
+                await aep_client.patch_tenant_schema(client, headers, schema_id, ops)
+                data["changesMade"] = data.get("changesMade", 0) + len(prop_ops)
+                log.info("Patched schema %s — added %d field(s)", schema_id, len(prop_ops))
+            else:
+                log.info("Schema %s fields already match enriched JSON", schema_id)
+            if warnings:
+                log.warning("Schema %s reconcile warnings: %s", schema_id, "; ".join(warnings))
+    return data
+
+
+# ── Step 9: PRIMARY_KEY_DESCRIPTOR ───────────────────────────────────────────
+async def primary_key_descriptor(ctx: dict, data: dict) -> dict:
+    payload = data["ajoPayload"]
+    primary_key = payload.get("primaryKey") or []
+    if not primary_key:
+        log.warning("No primary key for %s — skipping primary-key descriptor", ctx.get("schema_name"))
+        return data
+    schema_id = data["aepSchemaId"]
+    auth = await _resolve_aep_auth(ctx)
+    headers = _headers(auth)
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        created = await _create_descriptor(client, headers, {
+            "@type": "xdm:descriptorPrimaryKey",
+            "xdm:sourceSchema": schema_id,
+            "xdm:sourceVersion": 1,
+            "xdm:sourceProperty": [f"/{k}" for k in primary_key],
+        })
+    if created:
+        data["changesMade"] = data.get("changesMade", 0) + 1
+    return data
+
+
+# ── Step 10: VERSION_DESCRIPTOR ──────────────────────────────────────────────
+async def version_descriptor(ctx: dict, data: dict) -> dict:
+    payload = data["ajoPayload"]
+    version_field = payload.get("versionField")
+    if not version_field:
+        log.warning("No version field for %s — skipping version descriptor", ctx.get("schema_name"))
+        return data
+    schema_id = data["aepSchemaId"]
+    auth = await _resolve_aep_auth(ctx)
+    headers = _headers(auth)
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        created = await _create_descriptor(client, headers, {
+            "@type": "xdm:descriptorVersion",
+            "xdm:sourceSchema": schema_id,
+            "xdm:sourceVersion": 1,
+            "xdm:sourceProperty": f"/{version_field}",
+        })
+    if created:
+        data["changesMade"] = data.get("changesMade", 0) + 1
+    return data
+
+
+# ── Step 11: TIMESTAMP_DESCRIPTOR (time-series only) ─────────────────────────
+async def timestamp_descriptor(ctx: dict, data: dict) -> dict:
+    payload = data["ajoPayload"]
+    if payload.get("behavior") != "time-series":
+        return data  # spec §7: record schemas skip this
+    timestamp_field = payload.get("timestampField")
+    if not timestamp_field:
+        log.warning("Time-series schema %s has no timestamp field — skipping", ctx.get("schema_name"))
+        return data
+    schema_id = data["aepSchemaId"]
+    auth = await _resolve_aep_auth(ctx)
+    headers = _headers(auth)
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        created = await _create_descriptor(client, headers, {
+            "@type": "xdm:descriptorTimestamp",
+            "xdm:sourceSchema": schema_id,
+            "xdm:sourceVersion": 1,
+            "xdm:sourceProperty": f"/{timestamp_field}",
+        })
+    if created:
+        data["changesMade"] = data.get("changesMade", 0) + 1
+    return data
+
+
+# ── Step 12: IDENTITY_DESCRIPTOR (optional — true person keys only) ──────────
+async def identity_descriptor(ctx: dict, data: dict) -> dict:
+    payload = data["ajoPayload"]
+    identity_field = payload.get("identityField")
+    if not identity_field:
+        return data
+    namespace = _resolve_person_namespace(identity_field)
+    if not namespace:
+        log.info("Identity field %r is not a person key — skipping identity descriptor", identity_field)
+        return data
+    # AEP only allows an identity descriptor to point at a string field.
+    field_type = next((f.get("type") for f in payload.get("fields", []) if f.get("name") == identity_field), None)
+    if field_type != "string":
+        log.info("Identity field %r is type %r (not string) — skipping identity descriptor", identity_field, field_type)
+        return data
+    schema_id = data["aepSchemaId"]
+    source_property = f"/{identity_field}"
+    auth = await _resolve_aep_auth(ctx)
+    headers = _headers(auth)
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        # Ensure the namespace exists on the Identity Service (region host).
+        namespaces = await aep_client.list_identity_namespaces(client, _headers(auth, content_type=False))
+        if not any((ns.get("code") or "").lower() == namespace.lower() for ns in namespaces):
+            id_type = _NAMESPACE_CONFIG.get("idTypeByNamespace", {}).get(
+                namespace, _NAMESPACE_CONFIG.get("defaultIdType", "CROSS_DEVICE")
+            )
+            await aep_client.create_identity_namespace(client, headers, {
+                "name": namespace,
+                "code": namespace,
+                "description": f"Namespace migrated from Adobe Campaign for {namespace}.",
+                "idType": id_type,
+            })
+            log.info("Created identity namespace %s (idType=%s)", namespace, id_type)
+
+        created = await _create_descriptor(client, headers, {
+            "@type": "xdm:descriptorIdentity",
+            "xdm:sourceSchema": schema_id,
+            "xdm:sourceVersion": 1,
+            "xdm:sourceProperty": source_property,
+            "xdm:namespace": namespace,
+            "xdm:property": "xdm:code",
+        })
+        if created:
+            data["changesMade"] = data.get("changesMade", 0) + 1
+    return data
+
+
+# ── Step 13: RELATIONSHIP_DESCRIPTORS (PASS 2 — global reconcile) ────────────
+async def _desired_links_touching(ctx: dict, schema_name: str) -> list[dict]:
+    """
+    Every desired relationship (from converted_schemas.enriched_json) where this
+    schema is the source OR the target — so a deferred link A→B is created on
+    whichever run is the first where both A and B exist. Reads existing rows
+    only; no new persistence.
+    """
+    async with AsyncSessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(ConvertedSchema)
+                .where(ConvertedSchema.login_id == ctx["login_id"])
+                .order_by(ConvertedSchema.created_at.desc())
+            )
+        ).scalars().all()
+
+    links: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not row.enriched_json or row.schema_name in seen:
+            continue
+        seen.add(row.schema_name)  # keep only the latest enriched row per schema_name
+        try:
+            payload = json.loads(row.enriched_json)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for rel in payload.get("relationships", []) or []:
+            target = rel.get("targetSchema")
+            if not target or not rel.get("foreignKey"):
+                continue
+            if row.schema_name != schema_name and target != schema_name:
+                continue  # link doesn't touch this schema
+            links.append({
+                "source_schema": row.schema_name,
+                "foreign_key": rel.get("foreignKey"),
+                "target_schema": target,
+                "target_key": rel.get("targetKey"),
+                "cardinality": rel.get("cardinality"),
+            })
+    return links
+
+
+async def relationship_descriptors(ctx: dict, data: dict) -> dict:
+    schema_name = ctx.get("schema_name")
+    auth = await _resolve_aep_auth(ctx)
+    headers = _headers(auth)
+    headers_get = _headers(auth, content_type=False)
+    created = 0
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        schemas = await aep_client.list_tenant_schemas(client, headers_get)
+        title_to_id = {
+            s.get("title"): (s.get("$id") or s.get("meta:altId")) for s in schemas if s.get("title")
+        }
+        existing = await aep_client.list_tenant_descriptors(client, headers_get)
+
+        for link in await _desired_links_touching(ctx, schema_name):
+            source_id = title_to_id.get(link["source_schema"])
+            dest_id = title_to_id.get(link["target_schema"])
+            source_property = _rel_source_property(link["foreign_key"])
+            if not source_id or not dest_id:
+                log.info("Deferring relationship %s → %s (target not in registry yet)",
+                         link["source_schema"], link["target_schema"])
+                continue
+            if not source_property:
+                log.warning("Skipping relationship %s → %s: foreign key %r is not root-level",
+                            link["source_schema"], link["target_schema"], link["foreign_key"])
+                continue
+            if _has_relationship(existing, source_id, source_property, dest_id):
+                continue
+            body = {
+                "@type": "xdm:descriptorRelationship",
+                "xdm:sourceSchema": source_id,
+                "xdm:sourceVersion": 1,
+                "xdm:sourceProperty": source_property,
+                "xdm:destinationSchema": dest_id,
+                "xdm:destinationVersion": 1,
+                "xdm:cardinality": _normalize_cardinality(link.get("cardinality")),
+            }
+            if link.get("target_key"):
+                body["xdm:destinationProperty"] = f"/{str(link['target_key']).lstrip('/')}"
+            if await _create_descriptor(client, headers, body):
+                existing.append(body)  # prevent a duplicate within this same pass
+                created += 1
+                log.info("Created relationship %s %s → %s", link["source_schema"], source_property, link["target_schema"])
+
+    data["relationshipsCreated"] = data.get("relationshipsCreated", 0) + created
+    return data
+
+
+# ── Step 14: VERIFY ──────────────────────────────────────────────────────────
+async def verify(ctx: dict, data: dict) -> dict:
+    payload = data["ajoPayload"]
+    title = data.get("pushTitle") or _push_title(ctx, payload)
+    auth = await _resolve_aep_auth(ctx)
+    headers_get = _headers(auth, content_type=False)
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        schemas = await aep_client.list_tenant_schemas(client, headers_get)
+        match = next((s for s in schemas if s.get("title") == title), None)
+        if not match:
+            raise ValueError(f"Verification failed — schema {title!r} not found in registry")
+        schema_id = match.get("$id") or match.get("meta:altId")
+        data["aepSchemaId"] = schema_id
+        mine = _descriptors_for(await aep_client.list_tenant_descriptors(client, headers_get), schema_id)
+
+    types = {d.get("@type") for d in mine}
+    warnings = data.get("warnings", [])
+    # Note: GET /tenant/descriptors does not list version/timestamp descriptors, so
+    # we don't assert them here — their create step is authoritative.
+    data["verification"] = {
+        "schema": True,
+        "primaryKey": "xdm:descriptorPrimaryKey" in types,
+        "relationships": sum(1 for d in mine if d.get("@type") == "xdm:descriptorRelationship"),
+        "warnings": len(warnings),
+    }
+    if warnings:
+        log.warning("Schema %s completed with %d warning(s): %s", title, len(warnings), "; ".join(warnings))
+    log.info("Verified %s: %s", title, data["verification"])
     return data
 
 

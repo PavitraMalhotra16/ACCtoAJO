@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getSchemas, getSchemaDetail } from '../api/client'
-import { startConversion, startMigration, getExtractedSchemas, getIncompleteSchemas, type IncompleteSchema } from '../api/migration'
+import { startConversion, getExtractedSchemas, getIncompleteSchemas, getPushedSchemas, type IncompleteSchema } from '../api/migration'
 
 interface SchemaEntry { namespace: string; name: string; label: string }
 
@@ -152,6 +152,7 @@ export default function MigrationSelectPage() {
   const [loadingDetail, setLoadingDetail] = useState<Set<string>>(new Set())
   const [expanded, setExpanded]       = useState<Set<string>>(new Set())
   const [extracted, setExtracted]     = useState<Set<string>>(new Set())
+  const [pushed, setPushed]           = useState<Set<string>>(new Set())
   const [incomplete, setIncomplete]   = useState<Record<string, IncompleteSchema>>({})
 
   useEffect(() => {
@@ -159,10 +160,12 @@ export default function MigrationSelectPage() {
       getSchemas(),
       getExtractedSchemas(),
       getIncompleteSchemas(),
+      getPushedSchemas(),
     ])
-      .then(([schemasData, extractedData, incompleteData]) => {
+      .then(([schemasData, extractedData, incompleteData, pushedData]) => {
         setSchemas(schemasData.schemas ?? [])
         setExtracted(new Set(extractedData.extracted))
+        setPushed(new Set(pushedData.schemas))
 
         const incompleteMap: Record<string, IncompleteSchema> = {}
         for (const s of incompleteData.schemas) incompleteMap[s.schema_name] = s
@@ -255,24 +258,12 @@ export default function MigrationSelectPage() {
     setStarting(true)
     setError(null)
     try {
-      // If every selected schema already has extracted JSON (all are failed-migration
-      // retries, not new selections), skip re-extraction and go straight to migration.
-      const allAlreadyExtracted = chosen.every(s => extracted.has(key(s)))
-      if (allAlreadyExtracted) {
-        const data = await startMigration()
-        if (data.message === 'all_done') {
-          setError('All selected schemas are already fully migrated.')
-          setStarting(false)
-          return
-        }
-        navigate(`/migration/run?migrate_job=${data.job_id}`)
-        return
-      }
-
-      // Normal path: new schemas need extraction first
+      // Always re-extract the selected schemas from ACC first (picks up any changes
+      // made in ACC since a prior run); the run page then pushes them to AJO. The
+      // push reconciles against AEP, so already-pushed/unchanged schemas no-op.
       const data = await startConversion(chosen)
-      if (data.message === 'all_done' || !data.job_id) {
-        setError('All selected schemas are already migrated — nothing new to extract.')
+      if (!data.job_id) {
+        setError('Could not start extraction — please try again.')
         setStarting(false)
         return
       }
@@ -353,84 +344,69 @@ export default function MigrationSelectPage() {
             {filtered.map(s => {
               const k = key(s)
               const checked = selected.has(k)
-              const alreadyExtracted = extracted.has(k)
-              const inProgress = incomplete[k]
-              const isFailed = inProgress?.status === 'FAILED'
+              const incomp = incomplete[k]
+              const isFailed = incomp?.status === 'FAILED'
+              const isBusy = incomp?.status === 'RUNNING' || incomp?.status === 'QUEUED'
+              const isPushed = pushed.has(k)
+              const isExtracted = extracted.has(k)
+              // Only a schema that's currently running/queued is locked; everything
+              // else (new, ready-to-push, pushed, failed) can be (re)selected to migrate.
+              const isLocked = isBusy
 
-              // FAILED pipeline status takes priority over extracted badge.
-              // Extracted-but-not-failed schemas remain locked (can't re-select).
-              const isLocked = isFailed ? false : (alreadyExtracted || !!inProgress)
+              let badge: { text: string; cls: string } | null = null
+              if (isBusy) {
+                badge = { text: 'In progress', cls: 'bg-amber-50 text-amber-600' }
+              } else if (isFailed) {
+                const err = incomp?.error_message
+                badge = {
+                  text: `Failed: ${incomp?.current_step ?? `step ${incomp?.current_step_order}`}${err ? ` — ${err.slice(0, 50)}${err.length > 50 ? '…' : ''}` : ''}`,
+                  cls: 'bg-red-50 text-red-600',
+                }
+              } else if (isPushed) {
+                badge = { text: 'Pushed to AJO — re-migrate to sync ACC changes', cls: 'bg-green-100 text-green-700' }
+              } else if (isExtracted) {
+                badge = { text: 'Ready to push', cls: 'bg-indigo-50 text-indigo-600' }
+              }
 
               return (
                 <div
                   key={k}
                   className={`flex items-start gap-3 px-4 py-3 border-b border-gray-100 transition-colors ${
-                    isFailed
-                      ? checked
-                        ? 'bg-red-50 border-l-2 border-l-red-400 cursor-pointer'
-                        : 'bg-red-50/50 cursor-pointer hover:bg-red-50'
-                      : isLocked
-                        ? 'bg-gray-50 cursor-default'
-                        : checked
-                          ? 'bg-blue-50 border-l-2 border-l-blue-500 cursor-pointer'
-                          : 'hover:bg-gray-50 cursor-pointer'
+                    isLocked
+                      ? 'bg-gray-50 cursor-default'
+                      : checked
+                        ? `${isFailed ? 'bg-red-50 border-l-2 border-l-red-400' : 'bg-blue-50 border-l-2 border-l-blue-500'} cursor-pointer`
+                        : 'hover:bg-gray-50 cursor-pointer'
                   }`}
                   onClick={() => { if (!isLocked) toggle(s) }}
                 >
-                  {/* Left icon */}
-                  {isFailed ? (
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggle(s)}
-                      onClick={e => e.stopPropagation()}
-                      className="mt-0.5 rounded accent-red-500"
-                    />
-                  ) : alreadyExtracted ? (
-                    <svg className="mt-0.5 w-4 h-4 text-green-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/>
+                  {isLocked ? (
+                    <svg className="animate-spin mt-0.5 w-4 h-4 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
                     </svg>
-                  ) : inProgress ? (
-                    <div className="mt-0.5 w-4 h-4 shrink-0 rounded-full border-2 border-blue-400" />
                   ) : (
                     <input
                       type="checkbox"
                       checked={checked}
                       onChange={() => toggle(s)}
                       onClick={e => e.stopPropagation()}
-                      className="mt-0.5 rounded"
+                      className={`mt-0.5 rounded ${isFailed ? 'accent-red-500' : ''}`}
                     />
                   )}
 
                   <div className="min-w-0 flex-1">
-                    <div className={`text-xs font-mono truncate ${isLocked ? 'text-gray-500' : isFailed ? 'text-red-700' : 'text-blue-700'}`}>
+                    <div className={`text-xs font-mono truncate ${isFailed ? 'text-red-700' : isPushed ? 'text-green-700' : 'text-blue-700'}`}>
                       {s.namespace}:{s.name}
                     </div>
                     <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                       {s.label && <span className="text-xs text-gray-400 truncate">{s.label}</span>}
-
-                      {!isFailed && alreadyExtracted && (
-                        <span className="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-700 font-medium shrink-0">
-                          Extracted — enriched JSON ready
-                        </span>
-                      )}
-
-                      {isFailed && (
+                      {badge && (
                         <span
-                          className="text-xs px-1.5 py-0.5 rounded font-medium shrink-0 bg-red-50 text-red-600"
-                          title={inProgress?.error_message ?? undefined}
+                          className={`text-xs px-1.5 py-0.5 rounded font-medium shrink-0 ${badge.cls}`}
+                          title={incomp?.error_message ?? undefined}
                         >
-                          Failed: {inProgress?.current_step ?? `step ${inProgress?.current_step_order}`}
-                          {inProgress?.error_message ? ` — ${inProgress.error_message.slice(0, 60)}${inProgress.error_message.length > 60 ? '…' : ''}` : ''}
-                        </span>
-                      )}
-
-                      {!isFailed && inProgress && (
-                        <span className="text-xs px-1.5 py-0.5 rounded font-medium shrink-0 bg-amber-50 text-amber-600">
-                          {inProgress.status === 'RUNNING' ? 'In progress' : 'Stopped at'}{' '}
-                          {inProgress.current_step
-                            ? inProgress.current_step === 'BUILD_PAYLOAD' ? 'Enriched JSON' : 'Extracted schema'
-                            : `step ${inProgress.current_step_order}`}
+                          {badge.text}
                         </span>
                       )}
                     </div>

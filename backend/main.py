@@ -5,8 +5,9 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
 from db import UserSession, SchemaJobItem, init_db, AsyncSessionLocal, ensure_schema_columns
@@ -66,6 +67,15 @@ app.include_router(auth_router)
 app.include_router(schemas_router)
 app.include_router(conversion_router)
 app.include_router(migrate_router)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Return the real error (and log the traceback) instead of a bare 500 body,
+    so the UI can show what actually went wrong. HTTPExceptions keep their own
+    handler, so 4xx detail messages are unaffected."""
+    log.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(status_code=500, content={"detail": f"{type(exc).__name__}: {exc}"})
 
 
 @app.get("/health")

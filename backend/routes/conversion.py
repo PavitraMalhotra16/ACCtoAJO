@@ -14,7 +14,7 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, Cookie, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.acc_soap import build_schema_inventory_envelope, build_srcschema_get_envelope, parse_fault, parse_schema_inventory
@@ -82,6 +82,15 @@ async def _run_conversion_job(job_id: str, schemas: list[SchemaRef], acc_conn, l
                     raise ValueError("Could not parse schema XML")
 
                 async with AsyncSessionLocal() as db_session:
+                    # Overwrite any prior extraction of this schema so a re-extract
+                    # always reflects the latest ACC definition (keep one fresh row;
+                    # enriched_json is rebuilt by the migration pipeline at step 5).
+                    await db_session.execute(
+                        delete(ConvertedSchema).where(
+                            ConvertedSchema.login_id == login_id,
+                            ConvertedSchema.schema_name == key,
+                        )
+                    )
                     db_session.add(ConvertedSchema(
                         job_id=job_id,
                         login_id=login_id,
@@ -125,19 +134,9 @@ async def convert_start(
     if not body.schemas:
         raise HTTPException(400, "No schemas selected")
 
-    # Skip schemas already extracted in DB
-    already_done_result = await db.execute(
-        select(ConvertedSchema.schema_name).where(ConvertedSchema.login_id == login_id)
-    )
-    already_done = {row[0] for row in already_done_result.fetchall()}
-    schemas_to_run = [s for s in body.schemas if f"{s.namespace}:{s.name}" not in already_done]
-
-    if not schemas_to_run:
-        return {
-            "job_id": None,
-            "message": "all_done",
-            "skipped": [f"{s.namespace}:{s.name}" for s in body.schemas],
-        }
+    # Always (re-)extract the selected schemas. A re-extract overwrites the prior
+    # extraction so changes made in ACC are picked up before the AJO push.
+    schemas_to_run = list(body.schemas)
 
     job_id = str(uuid.uuid4())
     _jobs[job_id] = {
@@ -151,7 +150,7 @@ async def convert_start(
     }
 
     asyncio.create_task(_run_conversion_job(job_id, schemas_to_run, acc, login_id))
-    return {"job_id": job_id, "message": "started", "skipped": list(already_done)}
+    return {"job_id": job_id, "message": "started", "skipped": []}
 
 
 @router.post("/start-all")
