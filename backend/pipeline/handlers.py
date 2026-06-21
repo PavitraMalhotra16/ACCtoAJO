@@ -13,7 +13,10 @@ from core.security import decrypt, encrypt
 from pipeline import aep_client
 
 IMS_TOKEN_URL = "https://ims-na1.adobelogin.com/ims/token/v3"
-IMS_SCOPES = "AdobeID,openid,read_organizations,adobeio_api,additional_details.projectedProductContext"
+# Must include additional_info.projectedProductContext — that scope carries the user's
+# region/product context. Without it AEP returns 403027 "User region is missing". Keep
+# this in sync with routes/auth.py (the scopes proven to work for the Schema Registry).
+IMS_SCOPES = "openid,AdobeID,read_organizations,additional_info.projectedProductContext,session"
 
 
 async def get_valid_access_token(dest: DestinationConnection, db) -> str:

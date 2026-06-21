@@ -65,6 +65,13 @@ def test_resolve_person_namespace():
     assert _resolve_person_namespace("orderId") is None  # not a person key
 
 
+def test_refresh_scopes_carry_region_context():
+    # additional_info.projectedProductContext carries the user's region; without it
+    # AEP returns 403027 "User region is missing" on Schema Registry calls.
+    from pipeline.handlers import IMS_SCOPES
+    assert "additional_info.projectedProductContext" in IMS_SCOPES
+
+
 def test_build_create_body_adhoc():
     from pipeline.handlers import _build_create_body
     body = _build_create_body(_payload(), "cus:recipient")
