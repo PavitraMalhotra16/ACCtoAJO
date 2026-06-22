@@ -12,6 +12,11 @@ Basic operations against the Adobe Experience Platform **Schema Registry**:
 > they change state. **List (2)** and **Display (3)** are read-only. Never execute without
 > confirmation.
 >
+> **Credentials — always ask the user directly.** Do NOT fetch or decrypt tokens from the database,
+> do NOT reuse tokens from `.env` files, and do NOT attempt to derive credentials from application
+> state. Always ask the user to supply: access token, API key (client ID), org ID, and sandbox name
+> before proceeding. Tokens expire — a freshly provided token is the only safe input.
+>
 > **Scope of Delete (1):** these steps apply only to schemas where **Profile is NOT enabled**
 > (`meta:immutableTags` does not contain `"union"`). Once a schema is Profile-enabled, AEP makes
 > that tag permanent — there is no API to remove it and deletion will be blocked. For those schemas,

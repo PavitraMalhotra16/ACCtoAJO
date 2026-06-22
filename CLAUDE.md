@@ -7,8 +7,12 @@ are out of scope — this tool handles relational (model-based, `adhoc-v2`) sche
 ## Run
 
 Use the helper scripts in `scripts/` — they free the port, kill stale instances, and run from
-the correct directory, which avoids the cwd / duplicate-process / stuck-socket issues. Each runs
-in the foreground (run in its own terminal; Ctrl+C stops).
+the correct directory, which avoids the cwd / duplicate-process / stuck-socket issues.
+
+**When asked to start or restart servers, always run them as background processes** using the
+Bash tool with `run_in_background: true`. Stop first with `stop-dev.ps1`, then launch backend,
+wait ~4 seconds, then launch frontend. After starting, read the output file to confirm the port
+each server bound to and report it to the user.
 
 **Backend** (FastAPI, port **8001**):
 ```powershell
