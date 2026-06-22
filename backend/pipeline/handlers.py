@@ -5,6 +5,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 import httpx
+from cryptography.fernet import InvalidToken as FernetInvalidToken
 from sqlalchemy import select
 from sqlalchemy.exc import ProgrammingError
 
@@ -22,13 +23,19 @@ async def get_valid_access_token(dest: DestinationConnection, db) -> str:
     buffer = timedelta(minutes=5)
 
     if dest.token_expires_at and dest.token_expires_at > now + buffer:
-        return decrypt(dest.encrypted_access_token)
+        try:
+            return decrypt(dest.encrypted_access_token)
+        except FernetInvalidToken:
+            raise ValueError("AJO access token could not be decrypted — the encryption key may have changed. Please reconnect AJO.")
 
     # Token expired or missing — refresh using stored client_id:client_secret
     if not dest.encrypted_credentials:
         raise ValueError("No OAuth credentials stored — reconnect AJO")
 
-    raw = decrypt(dest.encrypted_credentials)
+    try:
+        raw = decrypt(dest.encrypted_credentials)
+    except FernetInvalidToken:
+        raise ValueError("AJO credentials could not be decrypted — the encryption key may have changed. Please reconnect AJO.")
     parts = raw.split(":", 1)
     if len(parts) != 2:
         raise ValueError("Stored credentials malformed — reconnect AJO")
@@ -173,25 +180,41 @@ def _compute_primary_key(keys: dict) -> list[str]:
 
 
 def _compute_behavior(keys: dict, source_name: str, root_name: str) -> str:
-    auto_pk = keys.get("autoPk", {})
-    primary_keys = keys.get("primaryKeys", [])
-    composite_keys = keys.get("compositeKeys", [])
+    """Determine AEP behavior type.
 
+    Priority order:
+    1. autoPk → always record
+    2. Composite key containing a datetime-named field → time-series
+    3. Multi-field primary key containing a datetime-named field → time-series
+    4. Single primary key that is itself datetime-named → time-series
+    5. Any primary key structure without datetime hints → record
+    6. No key structure at all → fall back to schema-name keyword inference
+       (e.g. deliveryStatus, orderHistory, broadlog → time-series)
+    """
+    _TIMESTAMP_HINTS = {"date", "time", "ts", "timestamp", "created", "updated", "event"}
+
+    def has_ts_field(fields: list[str]) -> bool:
+        return any(any(h in f.lower() for h in _TIMESTAMP_HINTS) for f in fields)
+
+    auto_pk = keys.get("autoPk", {})
     if auto_pk.get("enabled"):
         return "record"
 
+    composite_keys = keys.get("compositeKeys", [])
     if composite_keys:
-        return "time-series"
+        fields = composite_keys[0].get("fields", [])
+        return "time-series" if has_ts_field(fields) else "record"
 
+    primary_keys = keys.get("primaryKeys", [])
     if primary_keys:
         fields = primary_keys[0].get("fields", [])
         if len(fields) > 1:
+            return "time-series" if has_ts_field(fields) else "record"
+        if len(fields) == 1 and has_ts_field(fields):
             return "time-series"
+        return "record"
 
-    has_any_pk = bool(primary_keys) or bool(composite_keys) or auto_pk.get("enabled")
-    if not has_any_pk:
-        return "time-series"
-
+    # No key structure — fall back to schema name keywords
     return _infer_behavior(source_name, root_name)
 
 
@@ -490,8 +513,8 @@ async def build_payload(ctx: dict, data: dict) -> dict:
         or f"Schema for {title}"
     )
 
-    # C. behavior (key-structure first, keyword fallback)
-    behavior = _compute_behavior(keys, source_name, root_name)
+    # C. behavior (key-structure first, keyword fallback on schema name + source name)
+    behavior = _compute_behavior(keys, source_name + schema_name, root_name)
 
     # E. primaryKey — always a list
     primary_key = _compute_primary_key(keys)
@@ -585,7 +608,7 @@ async def _resolve_aep_auth(ctx: dict) -> dict:
             "access_token": token,
             "api_key": dest.client_id,
             "org_id": dest.org_id,
-            "sandbox": dest.sandbox_name,
+            "sandbox": dest.sandbox_name.strip(),
             "tenant_id": dest.tenant_id,
         }
 
@@ -644,8 +667,7 @@ def _build_create_body(payload: dict, title: str) -> dict:
         "definitions": {"customFields": custom_fields},
         "allOf": [{"$ref": "#/definitions/customFields"}],
     }
-    if payload.get("behavior") == "time-series":
-        body["meta:behaviorType"] = "time-series"
+    body["meta:behaviorType"] = "time-series" if payload.get("behavior") == "time-series" else "record"
     return body
 
 
@@ -717,6 +739,13 @@ async def _create_descriptor(client: httpx.AsyncClient, headers: dict, body: dic
         if "already exists" in msg or "only one" in msg:
             log.info("Descriptor %s already present on %s — skipping",
                      body.get("@type"), body.get("xdm:sourceSchema"))
+            return False
+        # XDM-1855: version/timestamp descriptor attempted on a field that is already
+        # a primary key in AEP (common when behavior was created as time-series but
+        # enriched JSON targets record — behavior is immutable so we skip gracefully).
+        if "xdm-1855" in msg or "cannot be defined on xdm:descriptorprimarykey" in msg:
+            log.warning("Descriptor %s skipped on %s — field '%s' is already a primary key in AEP",
+                        body.get("@type"), body.get("xdm:sourceSchema"), body.get("xdm:sourceProperty"))
             return False
         raise
 
@@ -804,10 +833,12 @@ async def duplicate_check(ctx: dict, data: dict) -> dict:
     if match:
         data["aepSchemaId"] = match.get("$id") or match.get("meta:altId")
         data["schemaExisted"] = True
-        log.info("Schema %r already exists in registry (%s)", title, data["aepSchemaId"])
+        data["skipToVerify"] = True  # schema exists — skip create/descriptor steps
+        log.info("Schema %r already exists in registry (%s) — skipping to verify", title, data["aepSchemaId"])
     else:
         data["aepSchemaId"] = None
         data["schemaExisted"] = False
+        data["skipToVerify"] = False
     return data
 
 
@@ -820,13 +851,31 @@ async def create_schema(ctx: dict, data: dict) -> dict:
     async with httpx.AsyncClient(timeout=60.0) as client:
         if not data.get("aepSchemaId"):
             body = _build_create_body(payload, title)
-            created = await aep_client.create_tenant_schema(client, headers, body)
-            schema_id = created.get("$id") or created.get("meta:altId")
-            if not schema_id:
-                raise ValueError(f"Create schema returned no $id: {created}")
-            data["aepSchemaId"] = schema_id
-            data["changesMade"] = data.get("changesMade", 0) + 1
-            log.info("Created schema %r → %s", title, schema_id)
+            try:
+                created = await aep_client.create_tenant_schema(client, headers, body)
+                schema_id = created.get("$id") or created.get("meta:altId")
+                if not schema_id:
+                    raise ValueError(f"Create schema returned no $id: {created}")
+                data["aepSchemaId"] = schema_id
+                data["changesMade"] = data.get("changesMade", 0) + 1
+                log.info("Created schema %r → %s", title, schema_id)
+            except RuntimeError as exc:
+                # XDM-1521: concurrent run already created this schema between our
+                # DUPLICATE_CHECK and CREATE_SCHEMA — treat it as already existing.
+                if "XDM-1521" in str(exc) or "title not unique" in str(exc).lower():
+                    log.info("Schema %r created concurrently — fetching existing schema", title)
+                    schemas = await aep_client.list_tenant_schemas(
+                        client, _headers(auth, content_type=False)
+                    )
+                    match = next((s for s in schemas if s.get("title") == title), None)
+                    if not match:
+                        raise ValueError(f"Schema {title!r} reported as duplicate but not found in registry") from exc
+                    data["aepSchemaId"] = match.get("$id") or match.get("meta:altId")
+                    data["schemaExisted"] = True
+                    data["skipToVerify"] = True
+                    log.info("Resolved concurrent schema %r → %s", title, data["aepSchemaId"])
+                else:
+                    raise
         else:
             # Schema exists — add any columns present in the enriched JSON but
             # missing from the live schema (spec: final state == enriched JSON).
@@ -847,39 +896,60 @@ async def create_schema(ctx: dict, data: dict) -> dict:
                 )
 
             primary_key = set(payload.get("primaryKey") or [])
-            ops: list[dict] = []
+            prop_ops: list[dict] = []   # add new fields
+            req_ops: list[dict] = []    # add fields to required (separate call — idempotent)
+            seen_req: set[str] = set()  # dedup within this batch
             for field in payload.get("fields", []):
                 name = field.get("name")
                 if not name:
                     continue
                 if name not in existing_names:
-                    ops.append({
+                    prop_ops.append({
                         "op": "add",
                         "path": f"/definitions/customFields/properties/{name}",
                         "value": _field_to_property(field, name in primary_key),
                     })
-                    if field.get("required"):
-                        ops.append({"op": "add", "path": "/definitions/customFields/required/-", "value": name})
-                    continue
-                # Field already exists — we only add missing columns, never retype an
-                # existing one (a type change is rejected once data is ingested), so
-                # flag a type difference instead of silently leaving it.
-                desired_tf = (field.get("type"), field.get("format"))
-                existing_tf = existing_types.get(name)
-                if existing_tf and existing_tf[0] is not None and existing_tf != desired_tf:
-                    warnings.append(
-                        f"Field '{name}' type mismatch: AEP has {existing_tf[0]!r}"
-                        f"{'/' + existing_tf[1] if existing_tf[1] else ''}, enriched JSON wants "
-                        f"{desired_tf[0]!r}{'/' + desired_tf[1] if desired_tf[1] else ''}. Existing field left unchanged."
-                    )
+                    if field.get("required") and name not in seen_req:
+                        req_ops.append({"op": "add", "path": "/definitions/customFields/required/-", "value": name})
+                        seen_req.add(name)
+                else:
+                    # Existing field: ensure PK/required fields are in required[].
+                    # We send this as a separate PATCH and ignore uniqueItems errors
+                    # because xed-full+json (used for GET) has a different structure
+                    # than the non-full format (used for PATCH), making it unreliable
+                    # to read the live required array from the GET response.
+                    if (field.get("required") or name in primary_key) and name not in seen_req:
+                        req_ops.append({"op": "add", "path": "/definitions/customFields/required/-", "value": name})
+                        seen_req.add(name)
+                    # Type diff warning — never retype an existing field.
+                    desired_tf = (field.get("type"), field.get("format"))
+                    existing_tf = existing_types.get(name)
+                    if existing_tf and existing_tf[0] is not None and existing_tf != desired_tf:
+                        warnings.append(
+                            f"Field '{name}' type mismatch: AEP has {existing_tf[0]!r}"
+                            f"{'/' + existing_tf[1] if existing_tf[1] else ''}, enriched JSON wants "
+                            f"{desired_tf[0]!r}{'/' + desired_tf[1] if desired_tf[1] else ''}. Existing field left unchanged."
+                        )
 
-            prop_ops = [o for o in ops if "/properties/" in o["path"]]
-            if ops:
-                await aep_client.patch_tenant_schema(client, headers, schema_id, ops)
+            if prop_ops:
+                await aep_client.patch_tenant_schema(client, headers, schema_id, prop_ops)
                 data["changesMade"] = data.get("changesMade", 0) + len(prop_ops)
                 log.info("Patched schema %s — added %d field(s)", schema_id, len(prop_ops))
             else:
                 log.info("Schema %s fields already match enriched JSON", schema_id)
+
+            for req_op in req_ops:
+                field_name = req_op["value"]
+                try:
+                    await aep_client.patch_tenant_schema(client, headers, schema_id, [req_op])
+                    log.info("Patched schema %s — added '%s' to required[]", schema_id, field_name)
+                except RuntimeError as e:
+                    msg = str(e)
+                    if "uniqueItems" in msg or "is not changed" in msg or "XDM-1600" in msg:
+                        log.info("Schema %s field '%s' already in required[] — skipped", schema_id, field_name)
+                    else:
+                        raise
+
             if warnings:
                 log.warning("Schema %s reconcile warnings: %s", schema_id, "; ".join(warnings))
     return data

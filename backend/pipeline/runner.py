@@ -72,8 +72,16 @@ async def _run_steps(
 ) -> tuple[bool, dict]:
     """Run a contiguous set of pipeline steps. Returns (ok, data); on failure the
     item is marked FAILED and ok=False."""
+    # Steps that are skipped when the schema already exists in AEP
+    _SKIP_IF_EXISTS = {"CREATE_SCHEMA", "PRIMARY_KEY_DESCRIPTOR", "VERSION_DESCRIPTOR",
+                       "TIMESTAMP_DESCRIPTOR", "IDENTITY_DESCRIPTOR"}
+
     for step in steps:
         if step.order <= resume_from_step:
+            continue
+
+        if data.get("skipToVerify") and step.name in _SKIP_IF_EXISTS:
+            log.info("Schema %s — %s skipped (schema already in AEP)", ctx.get("schema_name"), step.name)
             continue
 
         await _update_item(item_id, "RUNNING", step.name, step.order)
@@ -138,13 +146,17 @@ async def run_schema_phase2(
     resume_from_step: int = 0,
 ) -> None:
     """PASS 2 — wire relationships, verify, then mark the schema's final state."""
+    if data.get("skipToVerify"):
+        # Schema already existed and all steps were skipped — mark immediately.
+        await _update_item(item_id, "COMPLETED", "ALREADY_EXISTS", _TOTAL_STEPS)
+        log.info("Schema %s push complete (ALREADY_EXISTS — fast path)", ctx.get("schema_name"))
+        return
+
     ok, data = await _run_steps(item_id, ctx, _PHASE2_STEPS, data, resume_from_step)
     if not ok:
         return
 
     any_changes = data.get("changesMade", 0) + data.get("relationshipsCreated", 0)
-    # Schema + all its pieces were already in AEP and nothing was added → inform
-    # the user it already exists; otherwise it was created or topped-up.
     final_step = "ALREADY_EXISTS" if (data.get("schemaExisted") and any_changes == 0) else "COMPLETED"
     await _update_item(item_id, "COMPLETED", final_step, _TOTAL_STEPS)
     log.info("Schema %s push complete (%s)", ctx.get("schema_name"), final_step)

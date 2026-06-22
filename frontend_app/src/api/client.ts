@@ -1,5 +1,14 @@
 const BASE = ''
 
+async function extractError(res: Response, fallback: string): Promise<string> {
+  try {
+    const body = await res.json()
+    return body?.detail || fallback
+  } catch {
+    return `${fallback} (HTTP ${res.status})`
+  }
+}
+
 export async function accConnect(payload: Record<string, string>) {
   const res = await fetch(`${BASE}/api/acc/connect`, {
     method: 'POST',
@@ -7,10 +16,7 @@ export async function accConnect(payload: Record<string, string>) {
     credentials: 'include',
     body: JSON.stringify(payload),
   })
-  if (!res.ok) {
-    const err = await res.json()
-    throw new Error(err.detail || 'Connection failed')
-  }
+  if (!res.ok) throw new Error(await extractError(res, 'Connection failed'))
   return res.json()
 }
 
@@ -25,28 +31,19 @@ export async function ajoConnect(orgId: string, clientId: string, clientSecret: 
     credentials: 'include',
     body: JSON.stringify({ org_id: orgId, client_id: clientId, client_secret: clientSecret, sandbox_name: sandboxName }),
   })
-  if (!res.ok) {
-    const err = await res.json()
-    throw new Error(err.detail || 'Connection failed')
-  }
+  if (!res.ok) throw new Error(await extractError(res, 'Connection failed'))
   return res.json()
 }
 
 export async function getSchemas(): Promise<{ schemas: Array<{ namespace: string; name: string; label: string }> }> {
   const res = await fetch(`${BASE}/api/acc/schemas`, { credentials: 'include' })
-  if (!res.ok) {
-    const err = await res.json()
-    throw new Error(err.detail || 'Failed to fetch schemas')
-  }
+  if (!res.ok) throw new Error(await extractError(res, 'Failed to fetch schemas'))
   return res.json()
 }
 
 export async function getSchemaDetail(namespace: string, name: string): Promise<unknown> {
   const res = await fetch(`${BASE}/api/acc/schemas/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`, { credentials: 'include' })
-  if (!res.ok) {
-    const err = await res.json()
-    throw new Error(err.detail || 'Failed to fetch schema detail')
-  }
+  if (!res.ok) throw new Error(await extractError(res, 'Failed to fetch schema detail'))
   return res.json()
 }
 

@@ -100,7 +100,7 @@ async def ajo_connect(
     if conn:
         conn.client_id = body.client_id
         conn.tenant_id = tenant_id
-        conn.sandbox_name = body.sandbox_name
+        conn.sandbox_name = body.sandbox_name.strip()
         conn.encrypted_credentials = encrypted_creds
         conn.encrypted_access_token = encrypted_token
         conn.token_expires_at = token_expires_at
@@ -111,7 +111,7 @@ async def ajo_connect(
             org_id=body.org_id,
             tenant_id=tenant_id,
             client_id=body.client_id,
-            sandbox_name=body.sandbox_name,
+            sandbox_name=body.sandbox_name.strip(),
             encrypted_credentials=encrypted_creds,
             encrypted_access_token=encrypted_token,
             token_expires_at=token_expires_at,
