@@ -199,6 +199,7 @@ async def migrate_status(
                 "identity_is_primary": i.identity_is_primary,
                 "error_message": i.error_message,
                 "warnings": _warnings_of(i),
+                "fields_added": i.fields_added or 0,
                 "created_at": i.created_at.isoformat(),
                 "completed_at": i.completed_at.isoformat() if i.completed_at else None,
             }

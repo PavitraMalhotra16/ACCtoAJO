@@ -14,7 +14,7 @@ from core.security import decrypt, encrypt
 from pipeline import aep_client
 
 IMS_TOKEN_URL = "https://ims-na1.adobelogin.com/ims/token/v3"
-IMS_SCOPES = "AdobeID,openid,read_organizations,adobeio_api,additional_details.projectedProductContext"
+IMS_SCOPES = "openid,AdobeID,read_organizations,additional_info.projectedProductContext,session"
 
 
 async def get_valid_access_token(dest: DestinationConnection, db) -> str:

@@ -86,6 +86,7 @@ class SchemaJobItem(Base):
     identity_is_primary: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     current_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fields_added: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -168,6 +169,7 @@ async def init_db():
         for stmt in [
             "ALTER TABLE destination_connections ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(255)",
             "ALTER TABLE converted_schemas ADD COLUMN IF NOT EXISTS enriched_json TEXT",
+            "ALTER TABLE schema_job_items ADD COLUMN IF NOT EXISTS fields_added INTEGER NOT NULL DEFAULT 0",
         ]:
             try:
                 await conn.execute(__import__("sqlalchemy").text(stmt))

@@ -84,12 +84,36 @@ function InProgressCard({ s }: { s: MigrationSchemaItem }) {
 function CompletedCard({ s }: { s: MigrationSchemaItem }) {
   const dur = duration(s.created_at!, s.completed_at)
   const alreadyExisted = s.current_step === 'ALREADY_EXISTS'
+  const wasUpdated = s.current_step === 'UPDATED'
   const warnings = s.warnings ?? []
-  const borderColor = warnings.length ? 'border-amber-200' : alreadyExisted ? 'border-gray-200' : 'border-green-200'
+  const fieldsAdded = s.fields_added ?? 0
+
+  const borderColor = warnings.length
+    ? 'border-amber-200'
+    : alreadyExisted
+    ? 'border-gray-200'
+    : wasUpdated
+    ? 'border-blue-200'
+    : 'border-green-200'
+
+  const iconColor = alreadyExisted ? 'text-gray-400' : wasUpdated ? 'text-blue-500' : 'text-green-500'
+
+  const badgeClass = alreadyExisted
+    ? 'bg-gray-100 text-gray-600'
+    : wasUpdated
+    ? 'bg-blue-100 text-blue-700'
+    : 'bg-green-100 text-green-700'
+
+  const badgeLabel = alreadyExisted
+    ? 'Already in AJO — nothing to push'
+    : wasUpdated
+    ? `Updated in AJO — ${fieldsAdded} attribute${fieldsAdded !== 1 ? 's' : ''} added`
+    : 'Pushed to AJO'
+
   return (
     <div className={`bg-white border rounded-xl px-5 py-3.5 ${borderColor}`}>
       <div className="flex items-center gap-3">
-        <svg className={`w-4 h-4 shrink-0 ${alreadyExisted ? 'text-gray-400' : 'text-green-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg className={`w-4 h-4 shrink-0 ${iconColor}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/>
         </svg>
         <span className="font-mono text-sm text-gray-800 flex-1">{s.schema_name}</span>
@@ -99,8 +123,8 @@ function CompletedCard({ s }: { s: MigrationSchemaItem }) {
               {warnings.length} warning{warnings.length > 1 ? 's' : ''}
             </span>
           )}
-          <span className={`px-2 py-0.5 rounded-full font-medium ${alreadyExisted ? 'bg-gray-100 text-gray-600' : 'bg-green-100 text-green-700'}`}>
-            {alreadyExisted ? 'Already in AJO — nothing to push' : 'Pushed to AJO'}
+          <span className={`px-2 py-0.5 rounded-full font-medium ${badgeClass}`}>
+            {badgeLabel}
           </span>
           {dur && <span className="text-gray-400">· {dur}</span>}
         </div>

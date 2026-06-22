@@ -32,6 +32,7 @@ async def _update_item(
     error: str | None = None,
     identity_is_primary: bool | None = None,
     current_snapshot: str | None = None,
+    fields_added: int | None = None,
 ) -> None:
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -48,6 +49,8 @@ async def _update_item(
             item.identity_is_primary = identity_is_primary
         if current_snapshot is not None:
             item.current_snapshot = current_snapshot
+        if fields_added is not None:
+            item.fields_added = fields_added
         if status == "COMPLETED":
             item.completed_at = datetime.now(timezone.utc)
         await db.commit()
@@ -156,9 +159,16 @@ async def run_schema_phase2(
     if not ok:
         return
 
-    any_changes = data.get("changesMade", 0) + data.get("relationshipsCreated", 0)
-    final_step = "ALREADY_EXISTS" if (data.get("schemaExisted") and any_changes == 0) else "COMPLETED"
-    await _update_item(item_id, "COMPLETED", final_step, _TOTAL_STEPS)
+    prop_changes = data.get("changesMade", 0)
+    any_changes = prop_changes + data.get("relationshipsCreated", 0)
+    if data.get("schemaExisted") and any_changes == 0:
+        final_step = "ALREADY_EXISTS"
+    elif data.get("schemaExisted") and any_changes > 0:
+        final_step = "UPDATED"
+    else:
+        final_step = "COMPLETED"
+    await _update_item(item_id, "COMPLETED", final_step, _TOTAL_STEPS,
+                       fields_added=prop_changes if final_step == "UPDATED" else None)
     log.info("Schema %s push complete (%s)", ctx.get("schema_name"), final_step)
 
 

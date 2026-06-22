@@ -7,6 +7,7 @@ export interface MigrationSchemaItem {
   identity_is_primary: boolean | null
   error_message: string | null
   warnings?: string[]
+  fields_added?: number
   created_at: string
   completed_at: string | null
 }
