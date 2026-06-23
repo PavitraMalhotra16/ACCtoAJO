@@ -481,6 +481,7 @@ def build_list_templates_envelope(
         "<where>"
         '<condition expr="@isModel = 1"/>'
         '<condition expr="@builtIn != 1"/>'
+        '<condition expr="@internalName != \'notifyWkfToStop\'"/>'
         '<condition expr="@messageType = 0 OR @messageType = 1"/>'
         "</where>"
         '<orderBy><node expr="@id"/></orderBy>'
