@@ -104,6 +104,30 @@ class TenantConfig(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class AccTemplateRaw(Base):
+    """Stores the raw delivery XML exactly as returned from ACC SOAP API."""
+    __tablename__ = "acc_deliverytemplate_raw"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    login_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    batch_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    raw_xml: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class AccTemplateParsed(Base):
+    """Stores the parsed JSON extracted from the raw delivery XML."""
+    __tablename__ = "acc_deliverytemplate_parsed"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    login_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    batch_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    template_data: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 log = logging.getLogger("acc_backend.db")
 
 _MANAGED_TABLES = {"source_connections", "destination_connections"}
@@ -170,6 +194,8 @@ async def init_db():
             "ALTER TABLE destination_connections ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(255)",
             "ALTER TABLE converted_schemas ADD COLUMN IF NOT EXISTS enriched_json TEXT",
             "ALTER TABLE schema_job_items ADD COLUMN IF NOT EXISTS fields_added INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE acc_deliverytemplate_raw ADD COLUMN IF NOT EXISTS batch_id VARCHAR(255)",
+            "ALTER TABLE acc_deliverytemplate_parsed ADD COLUMN IF NOT EXISTS batch_id VARCHAR(255)",
         ]:
             try:
                 await conn.execute(__import__("sqlalchemy").text(stmt))

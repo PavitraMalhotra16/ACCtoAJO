@@ -5,6 +5,7 @@ All functions return/accept plain strings (UTF-8 XML).
 No credentials are logged anywhere in this module.
 """
 
+import html as html_lib
 import logging
 import xml.etree.ElementTree as ET
 from typing import Optional, Tuple
@@ -417,6 +418,264 @@ def _parse_element(el: ET.Element) -> dict:
     return {"tag": local_tag, "attrs": attrs, "children": children}
 
 
+def build_count_templates_envelope(session_token: str, security_token: str) -> bytes:
+    """Count nms:delivery records where @isModel=1 and @schema='nms:delivery'."""
+    envelope = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<soapenv:Envelope '
+        '    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
+        '    xmlns:urn="urn:xtk:queryDef">'
+        "<soapenv:Header>"
+        '<urn:SecurityHeader xmlns:urn="urn:xtk:session">'
+        f"<urn:sessiontoken>{_xml_escape(session_token)}</urn:sessiontoken>"
+        f"<urn:securityToken>{_xml_escape(security_token)}</urn:securityToken>"
+        "</urn:SecurityHeader>"
+        "</soapenv:Header>"
+        "<soapenv:Body>"
+        "<urn:ExecuteQuery>"
+        f"<urn:sessiontoken>{_xml_escape(session_token)}</urn:sessiontoken>"
+        "<urn:entity>"
+        '<queryDef schema="nms:delivery" operation="count">'
+        "<where>"
+        '<condition expr="@isModel = 1"/>'
+        '<condition expr="@messageType = 0 OR @messageType = 1"/>'
+        "</where>"
+        "</queryDef>"
+        "</urn:entity>"
+        "</urn:ExecuteQuery>"
+        "</soapenv:Body>"
+        "</soapenv:Envelope>"
+    )
+    return envelope.encode("utf-8")
+
+
+def build_list_templates_envelope(
+    session_token: str, security_token: str, page_size:int , start_line:int
+) -> bytes:
+    """Fetch all nms:delivery templates (isModel=1) with ALL fields — no select node restrictions
+    so the response includes content, subject, HTML body, etc. in the returned XML."""
+    envelope = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<soapenv:Envelope '
+        '    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
+        '    xmlns:urn="urn:xtk:queryDef">'
+        "<soapenv:Header>"
+        '<urn:SecurityHeader xmlns:urn="urn:xtk:session">'
+        f"<urn:sessiontoken>{_xml_escape(session_token)}</urn:sessiontoken>"
+        f"<urn:securityToken>{_xml_escape(security_token)}</urn:securityToken>"
+        "</urn:SecurityHeader>"
+        "</soapenv:Header>"
+        "<soapenv:Body>"
+        "<urn:ExecuteQuery>"
+        f"<urn:sessiontoken>{_xml_escape(session_token)}</urn:sessiontoken>"
+        "<urn:entity>"
+        f'<queryDef schema="nms:delivery" operation="select" lineCount="{page_size}" startLine="{start_line}">'
+        "<select>"
+        '<node expr="@id"/>'
+        '<node expr="@internalName"/>'
+        '<node expr="@label"/>'
+        '<node expr="@isModel"/>'
+        '<node expr="@messageType"/>'
+        '<node expr="@lastModified"/>'
+        "</select>"
+        "<where>"
+        '<condition expr="@isModel = 1"/>'
+        '<condition expr="@messageType = 0 OR @messageType = 1"/>'
+        "</where>"
+        '<orderBy><node expr="@id"/></orderBy>'
+        "</queryDef>"
+        "</urn:entity>"
+        "</urn:ExecuteQuery>"
+        "</soapenv:Body>"
+        "</soapenv:Envelope>"
+    )
+    return envelope.encode("utf-8")
+
+
+def build_get_delivery_envelope(session_token: str, security_token: str, delivery_id: str) -> bytes:
+    """Fetch one nms:delivery template by @id.
+    Uses NodeValue() to extract subject/html/text from inside the 'data' XML blob field."""
+    envelope = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<soapenv:Envelope '
+        '    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
+        '    xmlns:urn="urn:xtk:queryDef">'
+        "<soapenv:Header>"
+        '<urn:SecurityHeader xmlns:urn="urn:xtk:session">'
+        f"<urn:sessiontoken>{_xml_escape(session_token)}</urn:sessiontoken>"
+        f"<urn:securityToken>{_xml_escape(security_token)}</urn:securityToken>"
+        "</urn:SecurityHeader>"
+        "</soapenv:Header>"
+        "<soapenv:Body>"
+        "<urn:ExecuteQuery>"
+        f"<urn:sessiontoken>{_xml_escape(session_token)}</urn:sessiontoken>"
+        "<urn:entity>"
+        '<queryDef schema="nms:delivery" operation="get">'
+        "<select>"
+        '<node expr="@id"/>'
+        '<node expr="@internalName"/>'
+        '<node expr="@label"/>'
+        '<node expr="@messageType"/>'
+        '<node expr="@lastModified"/>'
+        '<node expr="desc"/>'
+        '<node expr="data"/>'
+        '<node expr="NodeValue(\'delivery/mailParameters/subject\', data)" alias="subject"/>'
+        "</select>"
+        "<where>"
+        f'<condition expr="@id = {_xml_escape(delivery_id)}"/>'
+        '<condition expr="@isModel = 1"/>'
+        "</where>"
+        "</queryDef>"
+        "</urn:entity>"
+        "</urn:ExecuteQuery>"
+        "</soapenv:Body>"
+        "</soapenv:Envelope>"
+    )
+    return envelope.encode("utf-8")
+
+
+def parse_count_response(xml_text: str) -> int:
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return 0
+    for el in root.iter():
+        local = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+        if local in ("collection", "delivery-collection", "queryDef"):
+            for attr in ("count", "recordCount"):
+                val = el.get(attr, "")
+                if val:
+                    try:
+                        return int(val)
+                    except ValueError:
+                        pass
+    count = sum(
+        1 for el in root.iter()
+        if (el.tag.split("}")[-1] if "}" in el.tag else el.tag) == "delivery"
+    )
+    return count
+
+
+def parse_template_list(xml_text: str) -> list[dict]:
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+    results = []
+    for el in root.iter():
+        local = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+        if local != "delivery":
+            continue
+        delivery_id = el.get("id", el.get("_id", ""))
+        if not delivery_id:
+            continue
+        msg_type = el.get("messageType", "0")
+        channel = "sms" if msg_type == "1" else "email"
+
+        # description
+        desc_el = el.find("desc")
+        description = ""
+        if desc_el is not None:
+            description = (desc_el.get("text", "") or desc_el.text or "").strip()
+
+        # content fields — available when no <select> restrictions are used
+        subject_raw = html_raw = text_raw = sms_raw = ""
+        content_el = el.find("content")
+        if content_el is not None:
+            subject_raw = content_el.get("subject", "").strip()
+            html_el = content_el.find("html")
+            if html_el is not None:
+                html_raw = (html_el.get("source", "") or html_el.text or "").strip()
+            text_el = content_el.find("textContent")
+            if text_el is not None:
+                text_raw = (text_el.get("source", "") or text_el.text or "").strip()
+            if channel == "sms":
+                sms_raw = text_raw or content_el.get("text", "").strip()
+
+        results.append({
+            "id": delivery_id,
+            "internalName": el.get("internalName", ""),
+            "label": el.get("label", el.get("_cs", "")),
+            "messageType": msg_type,
+            "channel": channel,
+            "lastModified": el.get("lastModified", ""),
+            "description": description,
+            "subjectRaw": subject_raw,
+            "htmlRaw": html_raw,
+            "textRaw": text_raw,
+            "smsRaw": sms_raw,
+            "rawXml": ET.tostring(el, encoding="unicode"),
+        })
+    return results
+
+
+def parse_delivery_detail(xml_text: str) -> dict:
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return {}
+    delivery_el = None
+    for el in root.iter():
+        if (el.tag.split("}")[-1] if "}" in el.tag else el.tag) == "delivery":
+            delivery_el = el
+            break
+    if delivery_el is None:
+        return {}
+
+    msg_type = delivery_el.get("messageType", "0")
+    channel = "sms" if msg_type == "1" else "email"
+
+    desc_el = _find(delivery_el, "desc")
+    description = (desc_el.text or "").strip() if desc_el is not None else ""
+
+    # Subject: NodeValue alias is short enough — safe to use directly
+    subject_el = _find(delivery_el, "subject")
+    subject_raw = (subject_el.text or "").strip() if subject_el is not None else ""
+
+    # Subject fallback: mailParameters/subject CDATA
+    if not subject_raw:
+        mail_params = _find(delivery_el, "mailParameters")
+        if mail_params is not None:
+            subj_el = _find(mail_params, "subject")
+            if subj_el is not None:
+                subject_raw = (subj_el.text or "").strip()
+
+    # HTML: NodeValue truncates at ~1024 chars — always read from content/html/source CDATA
+    html_raw = ""
+    content_el = _find(delivery_el, "content")
+    if content_el is not None:
+        html_el = _find(content_el, "html")
+        if html_el is not None:
+            src_el = _find(html_el, "source")
+            if src_el is not None:
+                html_raw = (src_el.text or "").strip()
+
+    # Text: read from content/text/source CDATA
+    text_raw = ""
+    if content_el is not None:
+        text_el = _find(content_el, "text") or _find(content_el, "textContent")
+        if text_el is not None:
+            src_el = _find(text_el, "source")
+            text_raw = (src_el.text if src_el is not None else (text_el.get("source", "") or text_el.text or "")).strip()
+
+    sms_raw = text_raw if channel == "sms" else ""
+
+    return {
+        "id": delivery_el.get("id", ""),
+        "internalName": delivery_el.get("internalName", ""),
+        "label": delivery_el.get("label", delivery_el.get("_cs", "")),
+        "messageType": msg_type,
+        "channel": channel,
+        "lastModified": delivery_el.get("lastModified", ""),
+        "description": description,
+        "subjectRaw": subject_raw,
+        "htmlRaw": html_raw,
+        "textRaw": text_raw,
+        "smsRaw": sms_raw,
+        "rawXml": ET.tostring(delivery_el, encoding="unicode"),
+    }
+
+
 def parse_fault(xml_text: str) -> Optional[str]:
     try:
         root = ET.fromstring(xml_text)
@@ -439,6 +698,15 @@ def _find_text(root: ET.Element, paths: list[str]) -> Optional[str]:
         el = root.find(path)
         if el is not None and el.text:
             return el.text.strip()
+    return None
+
+
+def _find(el: ET.Element, local_tag: str) -> Optional[ET.Element]:
+    """Find first direct child by local tag name, ignoring XML namespace."""
+    for child in el:
+        tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        if tag == local_tag:
+            return child
     return None
 
 
