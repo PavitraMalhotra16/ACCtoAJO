@@ -558,6 +558,9 @@ def parse_count_response(xml_text: str) -> int:
     return count
 
 
+_EXCLUDED_INTERNAL_NAMES = {"notifyWkfToStop"}
+
+
 def parse_template_list(xml_text: str) -> list[dict]:
     try:
         root = ET.fromstring(xml_text)
@@ -570,6 +573,8 @@ def parse_template_list(xml_text: str) -> list[dict]:
             continue
         delivery_id = el.get("id", el.get("_id", ""))
         if not delivery_id:
+            continue
+        if el.get("internalName", "") in _EXCLUDED_INTERNAL_NAMES:
             continue
         msg_type = el.get("messageType", "0")
         channel = "sms" if msg_type == "1" else "email"
