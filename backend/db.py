@@ -104,6 +104,49 @@ class TenantConfig(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class TemplateFolderConfig(Base):
+    __tablename__ = "template_folder_config"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    destination_conn_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    channel: Mapped[str] = mapped_column(String(10), nullable=False)          # 'email' | 'sms'
+    folder_name: Mapped[str] = mapped_column(String(255), nullable=False)     # user-typed sample name
+    parent_folder_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class TemplateMigrationRun(Base):
+    __tablename__ = "template_migration_runs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    destination_conn_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    login_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING")
+    placeholder_map: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON string
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TemplateJobItem(Base):
+    __tablename__ = "template_job_items"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    internal_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    channel: Mapped[str] = mapped_column(String(10), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING")
+    current_step: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    current_step_order: Mapped[int] = mapped_column(Integer, default=0)
+    enriched_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ajo_template_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error_step: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 class AccTemplateRaw(Base):
     """Stores the raw delivery XML exactly as returned from ACC SOAP API."""
     __tablename__ = "acc_deliverytemplate_raw"
