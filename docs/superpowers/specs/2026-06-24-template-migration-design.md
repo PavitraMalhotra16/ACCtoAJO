@@ -3,7 +3,7 @@ _Date: 2026-06-24_
 
 ## Overview
 
-Extends the ACC → AJO migration tool to handle **delivery templates** (email + SMS) from Adobe Campaign Classic. Templates are extracted upstream into a Postgres table (`acc-extraction-past`) by another developer and stored as raw JSON blobs. This feature reads from that table, converts ACC syntax to AJO syntax, resolves AJO folder IDs, writes an `enriched_json` handoff per template, and shows live aggregate progress in the UI.
+Extends the ACC → AJO migration tool to handle **delivery templates** (email + SMS) from Adobe Campaign Classic. Templates are extracted upstream into a Postgres table (`acc_deliverytemplate_parsed`) by another developer and stored as raw JSON blobs. This feature reads from that table, converts ACC syntax to AJO syntax, resolves AJO folder IDs, writes an `enriched_json` handoff per template, and shows live aggregate progress in the UI.
 
 Scope of this feature: **Steps 1–4** (load → convert → resolve folder → write enriched JSON). Steps 5+ (duplicate check, AJO POST, verify) are stub pipeline slots for the next developer.
 
@@ -11,7 +11,7 @@ Scope of this feature: **Steps 1–4** (load → convert → resolve folder → 
 
 ## Input
 
-### Source DB table: `acc-extraction-past`
+### Source DB table: `acc_deliverytemplate_parsed`
 
 Each row is one ACC delivery template. Key fields used:
 
@@ -52,9 +52,10 @@ Each row is one ACC delivery template. Key fields used:
 ### Phase 2: Analysis + Placeholder Review (`TemplateAnalysisPage`)
 
 **Backend (`GET /api/templates/analysis`):**
-- Scans ALL `htmlBody` + `smsContent` fields in `acc-extraction-past`.
+- Scans ALL `htmlBody` + `smsContent` fields in `acc_deliverytemplate_parsed`.
 - Extracts every unique `recipient.*` expression via regex: `<%=\s*recipient\.(\w+)\s*%>`.
-- Returns deduplicated list with default AJO mappings from `placeholder_config.py`.
+- Extracts every unique `targetData.*` expression via regex: `<%=\s*targetData\.(\w+)\s*%>`.
+- Returns two deduplicated lists with default AJO mappings from `placeholder_config.py`.
 
 **`placeholder_config.py` (backend/pipeline/):**
 ```python
@@ -65,20 +66,37 @@ RECIPIENT_MAPPINGS = {
     "recipient.phone":      "profile.mobilePhone.number",
     # ... extend as needed
 }
+# targetData.* — no explicit config needed.
+# Default generated programmatically: context.targetData.<fieldname>
 ```
-Any `recipient.*` field NOT in the config gets a best-guess default: `profile.<fieldname>`.
+- Any `recipient.*` field NOT in the config gets a best-guess default: `profile.<fieldname>`.
+- Any `targetData.*` field always gets default: `context.targetData.<fieldname>`.
 
-**UI (Analysis page):**
-- Table: ACC Placeholder | Default AJO Mapping | Edit (pencil icon)
-- Clicking edit opens an inline text field; user types their preferred AJO path.
-- Non-`recipient.*` placeholders are NOT shown — they are handled automatically (see conversion rules).
+**UI (Analysis page) — two sections:**
+
+_Section 1: recipient.* placeholders_
+
+| ACC Placeholder | Default AJO Mapping | |
+|---|---|---|
+| `<%= recipient.firstName %>` | `{{profile.person.name.firstName}}` | ✏️ |
+| `<%= recipient.customField %>` | `{{profile.customField}}` | ✏️ |
+
+_Section 2: targetData.* placeholders_
+
+| ACC Placeholder | Default AJO Mapping | |
+|---|---|---|
+| `<%= targetData.manageSubscriptionURL %>` | `{{context.targetData.manageSubscriptionURL}}` | ✏️ |
+| `<%= targetData.orderId %>` | `{{context.targetData.orderId}}` | ✏️ |
+
+- Clicking the pencil opens an inline text field; user types their preferred AJO path and saves.
+- Everything else (`<%@ %>`, `<%if`, `<%for`, `formatDate()`, etc.) is NOT shown — handled automatically.
 
 **User action:** Reviews mappings, edits if needed, clicks **Confirm & Start Migration**.
 
 **Backend (`POST /api/templates/migrate`):**
 - Saves approved mapping as `placeholder_map` JSON into `template_migration_runs`.
 - Generates `run_id = str(uuid.uuid4())`.
-- Creates one `template_job_items` row per template row in `acc-extraction-past` with `status = PENDING`.
+- Creates one `template_job_items` row per template row in `acc_deliverytemplate_parsed` with `status = PENDING`.
 - Kicks off background pipeline.
 - Returns `run_id`.
 
@@ -143,7 +161,7 @@ File: `backend/template_pipeline_steps.py`
 
 | # | Step name | Phase | What it does |
 |---|---|---|---|
-| 1 | `LOAD_RAW` | 1 | Read one row from `acc-extraction-past`, validate required fields present |
+| 1 | `LOAD_RAW` | 1 | Read one row from `acc_deliverytemplate_parsed`, validate required fields present |
 | 2 | `CONVERT_PLACEHOLDERS` | 1 | Apply conversion rules to `htmlBody` / `smsContent` / `subject` |
 | 3 | `RESOLVE_FOLDER` | 1 | Look up `parentFolderId` from `template_folder_config` by `channel` |
 | 4 | `BUILD_ENRICHED` | 1 | Write `enriched_json` to `template_job_items` |
@@ -160,8 +178,8 @@ All phases run concurrently across templates (templates are independent — unli
 
 | Pattern | Rule | Output |
 |---|---|---|
-| `<%= recipient.x %>` | Look up in approved `placeholder_map` | `{{profile.x}}` or user's mapping |
-| `<%= targetData.x %>` | Bracket swap only | `{{targetData.x}}` |
+| `<%= recipient.x %>` | Look up in approved `placeholder_map` (user-reviewed) | `{{profile.x}}` or user's mapping |
+| `<%= targetData.x %>` | Look up in approved `placeholder_map` (user-reviewed, default: `context.targetData.x`) | `{{context.targetData.x}}` or user's mapping |
 | `<%@ include ... %>` | Add to `warnings[]`, keep raw | raw (flagged) |
 | `<%if`, `<%for` | Add to `warnings[]`, keep raw | raw (flagged) |
 | `formatDate()`, `formatPrice()` | Add to `warnings[]` as `manual_migration` | raw (flagged) |
@@ -170,6 +188,30 @@ All phases run concurrently across templates (templates are independent — unli
 | `%MIRROR%` | Auto-replace | `{{mirrorPageLink}}` |
 
 Templates with warnings still get `enriched_json` written — the next developer sees `warnings[]` and decides what to do with flagged sections.
+
+---
+
+## Image URL Handling (Step 2 — separate pass from placeholders)
+
+Image references are extracted and validated separately — they are never run through placeholder bracket conversion.
+
+**Extraction targets:**
+- `<img src="...">` attributes
+- CSS `background-image: url(...)` inline styles
+- VML/background fill attributes (if present in email HTML)
+
+**Decision rules:**
+
+| URL type | Action |
+|---|---|
+| Absolute HTTPS, static, public | Keep as-is |
+| Absolute HTTP (not HTTPS) | Add to `warnings[]` as `http_image` |
+| Relative URL (e.g. `/res/img/banner.jpg`) | Add to `warnings[]` as `relative_url` |
+| Contains ACC expression in URL (e.g. `src="...?id=<%= %>")` | Convert only the `<%= %>` part; keep base URL; add to `warnings[]` as `dynamic_url` |
+| Base64 inline (`data:image/...`) | Add to `warnings[]` as `base64_image` |
+| Signed/expiring URL (contains `token=`, `expires=`, `X-Amz-Expires=`) | Add to `warnings[]` as `signed_url` |
+
+**No reachability check at this stage** (no outbound HTTP calls during pipeline). URL shape is validated only. Reachability validation is flagged as out of scope for this developer's steps.
 
 ---
 
