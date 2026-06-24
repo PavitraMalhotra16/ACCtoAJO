@@ -39,6 +39,9 @@ from services.template_extractor import (
 log = logging.getLogger("acc_backend.templates")
 router = APIRouter()
 
+# Templates that must never be extracted or migrated regardless of what ACC returns
+_EXCLUDED_INTERNAL_NAMES = {"notifyWkfToStop"}
+
 
 async def _require_acc(db: AsyncSession, login_id: str | None) -> SourceConnection:
     if not login_id:
@@ -260,7 +263,10 @@ async def template_analysis(
     result = await db.execute(
         select(AccTemplateParsed).where(AccTemplateParsed.login_id == login_id)
     )
-    rows = result.scalars().all()
+    rows = [
+        r for r in result.scalars().all()
+        if json.loads(r.template_data or "{}").get("internalName") not in _EXCLUDED_INTERNAL_NAMES
+    ]
 
     re_recipient = re.compile(r"<%=\s*(recipient\.\w+)\s*%>")
     re_target = re.compile(r"<%=\s*(targetData\.\w+)\s*%>")
@@ -313,7 +319,10 @@ async def template_migrate(
     templates_result = await db.execute(
         select(AccTemplateParsed).where(AccTemplateParsed.login_id == login_id)
     )
-    templates = templates_result.scalars().all()
+    templates = [
+        t for t in templates_result.scalars().all()
+        if json.loads(t.template_data or "{}").get("internalName") not in _EXCLUDED_INTERNAL_NAMES
+    ]
     if not templates:
         raise HTTPException(400, "No templates found in acc_deliverytemplate_parsed for this user")
 
