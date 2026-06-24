@@ -11,9 +11,10 @@ GET  /api/templates/{id}          — single template payload-ready fields
 import asyncio
 import json
 import logging
+import re
 import uuid
-import uuid as uuid_module
 
+import httpx
 from fastapi import APIRouter, Cookie, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -216,7 +217,7 @@ async def _require_ajo(db: AsyncSession) -> DestinationConnection:
 
 
 async def _get_valid_ajo_token(dest: DestinationConnection, db: AsyncSession) -> str:
-    from pipeline.handlers import get_valid_access_token
+    from pipeline.handlers import get_valid_access_token  # deferred to avoid circular import
     return await get_valid_access_token(dest, db)
 
 
@@ -238,7 +239,6 @@ async def template_setup(
     dest = await _require_ajo(db)
     token = await _get_valid_ajo_token(dest, db)
 
-    import httpx
     headers = {
         "Authorization": f"Bearer {token}",
         "x-api-key": dest.client_id or "",
@@ -309,7 +309,6 @@ async def template_analysis(
     )
     rows = result.scalars().all()
 
-    import re
     re_recipient = re.compile(r"<%=\s*(recipient\.\w+)\s*%>")
     re_target = re.compile(r"<%=\s*(targetData\.\w+)\s*%>")
 
@@ -365,7 +364,7 @@ async def template_migrate(
     if not templates:
         raise HTTPException(400, "No templates found in acc_deliverytemplate_parsed for this user")
 
-    run_id = str(uuid_module.uuid4())
+    run_id = str(uuid.uuid4())
     run = TemplateMigrationRun(
         run_id=run_id,
         destination_conn_id=dest.id,
