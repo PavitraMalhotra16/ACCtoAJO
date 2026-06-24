@@ -57,17 +57,20 @@ async def run_template(
     data: dict = {"channel": channel}
 
     for step in _ACTIVE_STEPS:
-        await _update_item(item_id, "RUNNING", step.name, step.order)
         try:
+            await _update_item(item_id, "RUNNING", step.name, step.order)
             handler = await _load_handler(step.handler)
             data = await handler(ctx, data, db)
         except Exception as exc:
-            log.exception("Template %s failed at %s: %s", source_id, step.name, exc)
-            await _update_item(
-                item_id, "FAILED", step.name, step.order,
-                error_step=step.name,
-                error_message=str(exc) or type(exc).__name__,
-            )
+            log.exception("Template %s failed at step %s: %s", source_id, step.name, exc)
+            try:
+                await _update_item(
+                    item_id, "FAILED", step.name, step.order,
+                    error_step=step.name,
+                    error_message=str(exc) or type(exc).__name__,
+                )
+            except Exception:
+                log.exception("Could not mark item %s FAILED after step %s error", item_id, step.name)
             return False
 
     await _update_item(item_id, "COMPLETED", "BUILD_ENRICHED", len(_ACTIVE_STEPS))
@@ -77,23 +80,39 @@ async def run_template(
 async def _run_one(item: dict, placeholder_map: dict, sem: asyncio.Semaphore) -> None:
     async with _GLOBAL_SEM:
         async with sem:
-            async with AsyncSessionLocal() as db:
-                await run_template(
-                    item_id=item["id"],
-                    source_id=item["source_id"],
-                    login_id=item["login_id"],
-                    destination_conn_id=item["destination_conn_id"],
-                    placeholder_map=placeholder_map,
-                    channel=item["channel"],
-                    db=db,
-                )
+            try:
+                async with AsyncSessionLocal() as db:
+                    await run_template(
+                        item_id=item["id"],
+                        source_id=item["source_id"],
+                        login_id=item["login_id"],
+                        destination_conn_id=item["destination_conn_id"],
+                        placeholder_map=placeholder_map,
+                        channel=item["channel"],
+                        db=db,
+                    )
+            except Exception:
+                log.exception("Unhandled error running template item_id=%s source_id=%s",
+                              item.get("id"), item.get("source_id"))
+                # Ensure item is marked FAILED so it shows in the UI
+                try:
+                    await _update_item(
+                        item["id"], "FAILED", "UNKNOWN", 0,
+                        error_step="UNKNOWN",
+                        error_message="Unexpected runner error — check backend logs",
+                    )
+                except Exception:
+                    log.exception("Failed to mark item %s as FAILED", item.get("id"))
 
 
 async def run_template_migration(run_id: str, items: list[dict], placeholder_map: dict) -> None:
     """Orchestrate concurrent template migration for all items in a run."""
     sem = asyncio.Semaphore(5)
     tasks = [asyncio.create_task(_run_one(item, placeholder_map, sem)) for item in items]
-    await asyncio.gather(*tasks, return_exceptions=True)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for i, r in enumerate(results):
+        if isinstance(r, Exception):
+            log.error("Task %d for run %s raised: %s", i, run_id, r)
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(

@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import uuid
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Cookie, Depends, HTTPException
@@ -21,7 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import (
-    AccTemplateRaw, AccTemplateParsed, SourceConnection, get_db,
+    AccTemplateRaw, AccTemplateParsed, AsyncSessionLocal, SourceConnection, get_db,
     DestinationConnection, TemplateFolderConfig,
     TemplateMigrationRun, TemplateJobItem,
 )
@@ -164,6 +165,22 @@ async def extract_templates(
             "batch_id": batch_id, "errors": errors}
 
 
+@router.delete("/api/templates/stored")
+async def clear_stored_templates(
+    acc_session: str | None = Cookie(default=None),
+    acc_user: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete all previously stored templates for this user so extraction always starts fresh."""
+    from sqlalchemy import delete as sa_delete
+    login_id = await get_login_from_cookie(acc_session, db, acc_user)
+    if not login_id:
+        raise HTTPException(401, "Not authenticated")
+    await db.execute(sa_delete(AccTemplateParsed).where(AccTemplateParsed.login_id == login_id))
+    await db.execute(sa_delete(AccTemplateRaw).where(AccTemplateRaw.login_id == login_id))
+    await db.commit()
+    log.info("Cleared stored templates for login_id=%s", login_id)
+    return {"cleared": True}
 
 
 # ── Template migration routes ─────────────────────────────────────────────────
@@ -365,6 +382,18 @@ async def template_migrate(
     if not templates:
         raise HTTPException(400, "No templates found in acc_deliverytemplate_parsed for this user")
 
+    # Find source_ids that already completed successfully in any prior run for this user —
+    # so we never push the same template twice.
+    completed_result = await db.execute(
+        select(TemplateJobItem.source_id)
+        .join(TemplateMigrationRun, TemplateJobItem.run_id == TemplateMigrationRun.run_id)
+        .where(
+            TemplateMigrationRun.login_id == login_id,
+            TemplateJobItem.status == "COMPLETED",
+        )
+    )
+    already_done: set[str] = {row[0] for row in completed_result.all()}
+
     run_id = str(uuid.uuid4())
     run = TemplateMigrationRun(
         run_id=run_id,
@@ -377,39 +406,54 @@ async def template_migrate(
     await db.flush()
 
     items: list[dict] = []
+    skipped_already_done = 0
     for tmpl in templates:
         parsed = json.loads(tmpl.template_data) if tmpl.template_data else {}
         channel = parsed.get("channel", "email")
+
+        # Already fully migrated — skip entirely, no DB row needed
+        if tmpl.source_id in already_done:
+            skipped_already_done += 1
+            continue
+
+        # Unsupported channel — skip without creating a job row
         if channel not in ("email", "sms"):
-            channel_status = "SKIPPED"
-        else:
-            channel_status = "PENDING"
+            continue
 
         job_item = TemplateJobItem(
             run_id=run_id,
             source_id=tmpl.source_id,
             internal_name=parsed.get("internalName"),
             channel=channel,
-            status=channel_status,
+            status="PENDING",
         )
         db.add(job_item)
         await db.flush()
 
-        if channel_status == "PENDING":
-            items.append({
-                "id": job_item.id,
-                "source_id": tmpl.source_id,
-                "login_id": login_id,
-                "destination_conn_id": dest.id,
-                "channel": channel,
-            })
+        items.append({
+            "id": job_item.id,
+            "source_id": tmpl.source_id,
+            "login_id": login_id,
+            "destination_conn_id": dest.id,
+            "channel": channel,
+        })
 
     await db.commit()
+
+    if not items:
+        # Nothing new to migrate — mark run complete immediately
+        async with AsyncSessionLocal() as close_db:
+            res = await close_db.execute(select(TemplateMigrationRun).where(TemplateMigrationRun.run_id == run_id))
+            run_row = res.scalar_one()
+            run_row.status = "COMPLETED"
+            run_row.completed_at = datetime.now(timezone.utc)
+            await close_db.commit()
+        return {"run_id": run_id, "total": 0, "skipped_already_migrated": skipped_already_done}
 
     asyncio.create_task(
         run_template_migration(run_id, items, body.placeholder_map)
     )
-    return {"run_id": run_id, "total": len(items)}
+    return {"run_id": run_id, "total": len(items), "skipped_already_migrated": skipped_already_done}
 
 
 @router.get("/api/templates/runs/{run_id}/status")

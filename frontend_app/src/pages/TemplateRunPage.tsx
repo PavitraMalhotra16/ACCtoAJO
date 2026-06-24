@@ -24,7 +24,7 @@ interface RunStatus {
 
 function ProgressBar({ label, counts }: { label: string; counts: ChannelCounts }) {
   const { total, completed, failed } = counts;
-  const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+  const pct = total > 0 ? Math.round((completed / total) * 100) : 100;
   return (
     <div className="mb-5">
       <div className="flex justify-between text-sm mb-1">

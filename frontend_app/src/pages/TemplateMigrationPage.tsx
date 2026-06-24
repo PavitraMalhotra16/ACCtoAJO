@@ -40,21 +40,33 @@ export default function TemplateMigrationPage() {
     return () => { stopRef.current = true }
   }, [])
 
-  async function runExtraction() {
+  async function runExtraction(forceRefresh = false) {
     try {
+      if (forceRefresh) {
+        await fetch('/api/templates/stored', { method: 'DELETE', credentials: 'include' })
+      }
+
       const counts = await getTemplateCount()
       setTotal(counts.total)
       setStored(counts.stored)
 
-      if (counts.to_migrate > 0) {
-        let storedSoFar = counts.stored
-        while (!stopRef.current) {
-          const result = await extractTemplates()
-          if (result.total_found === 0) break
-          storedSoFar += result.extracted
-          setStored(storedSoFar)
-          if (result.total_found < 50) break
+      // If everything is already stored, skip extraction
+      if (counts.to_migrate === 0) {
+        setExtracting(false)
+        if (!stopRef.current) {
+          await loadFolderConfig()
+          setStep('setup')
         }
+        return
+      }
+
+      let storedSoFar = counts.stored
+      while (!stopRef.current) {
+        const result = await extractTemplates()
+        if (result.total_found === 0) break
+        storedSoFar += result.extracted
+        setStored(storedSoFar)
+        if (result.total_found < 50) break
       }
 
       setExtracting(false)
@@ -139,23 +151,23 @@ export default function TemplateMigrationPage() {
           {extractError ? (
             <div className="text-red-700 text-sm bg-red-50 border border-red-200 rounded-lg p-3">{extractError}</div>
           ) : step === 'setup' ? (
-            <p className="text-sm text-green-700">{stored} template{stored !== 1 ? 's' : ''} extracted and ready.</p>
+            <div className="flex items-center justify-between">
+              <p className="text-sm text-green-700">{stored} template{stored !== 1 ? 's' : ''} extracted and ready.</p>
+              <button
+                onClick={() => {
+                  setStep('extracting')
+                  setExtracting(true)
+                  setExtractError(null)
+                  stopRef.current = false
+                  runExtraction(true)
+                }}
+                className="text-xs text-gray-400 hover:text-gray-600 underline"
+              >
+                Re-extract
+              </button>
+            </div>
           ) : (
-            <>
-              <p className="text-sm text-gray-500 mb-3">
-                {extracting
-                  ? `Fetching templates from ACC… ${stored}${total > 0 ? ` / ${total}` : ''} stored`
-                  : `${stored} template${stored !== 1 ? 's' : ''} extracted.`}
-              </p>
-              {total > 0 && (
-                <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
-                  <div className="h-2 rounded-full bg-blue-500 transition-all duration-500" style={{ width: `${pct}%` }} />
-                </div>
-              )}
-              {extracting && (
-                <p className="text-xs text-gray-400 mt-2 animate-pulse">This may take a moment for large sets…</p>
-              )}
-            </>
+            <p className="text-sm text-gray-500 animate-pulse">Extraction in progress…</p>
           )}
         </div>
 

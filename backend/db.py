@@ -163,6 +163,9 @@ class AccTemplateRaw(Base):
 class AccTemplateParsed(Base):
     """Stores the parsed JSON extracted from the raw delivery XML."""
     __tablename__ = "acc_deliverytemplate_parsed"
+    __table_args__ = (
+        UniqueConstraint("login_id", "source_id", name="uq_template_parsed_login_source"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     login_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
@@ -240,6 +243,8 @@ async def init_db():
             "ALTER TABLE schema_job_items ADD COLUMN IF NOT EXISTS fields_added INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE acc_deliverytemplate_raw ADD COLUMN IF NOT EXISTS batch_id VARCHAR(255)",
             "ALTER TABLE acc_deliverytemplate_parsed ADD COLUMN IF NOT EXISTS batch_id VARCHAR(255)",
+            "ALTER TABLE acc_deliverytemplate_parsed DROP CONSTRAINT IF EXISTS uq_template_parsed_login_source",
+            "ALTER TABLE acc_deliverytemplate_parsed ADD CONSTRAINT uq_template_parsed_login_source UNIQUE (login_id, source_id)",
         ]:
             try:
                 await conn.execute(__import__("sqlalchemy").text(stmt))
