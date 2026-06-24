@@ -7,7 +7,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, text
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -106,6 +106,7 @@ class TenantConfig(Base):
 
 class TemplateFolderConfig(Base):
     __tablename__ = "template_folder_config"
+    __table_args__ = (UniqueConstraint("destination_conn_id", "channel", name="uq_folder_dest_channel"),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     destination_conn_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
@@ -123,7 +124,7 @@ class TemplateMigrationRun(Base):
     destination_conn_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     login_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING")
-    placeholder_map: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON string
+    placeholder_map: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON: {"recipient.email": "profile.workEmail.address", ...}
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -132,7 +133,7 @@ class TemplateJobItem(Base):
     __tablename__ = "template_job_items"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    run_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)  # = TemplateMigrationRun.run_id
     source_id: Mapped[str] = mapped_column(String(255), nullable=False)
     internal_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     channel: Mapped[str] = mapped_column(String(10), nullable=False)
