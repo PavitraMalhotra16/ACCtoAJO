@@ -4,6 +4,14 @@ import { getTemplateCount, extractTemplates } from '../api/templates'
 
 type Step = 'extracting' | 'setup'
 
+interface FolderConfig {
+  configured: boolean
+  email_folder_name?: string
+  sms_folder_name?: string
+  email_folder_id?: string
+  sms_folder_id?: string
+}
+
 export default function TemplateMigrationPage() {
   const navigate = useNavigate()
 
@@ -18,6 +26,8 @@ export default function TemplateMigrationPage() {
   const stopRef = useRef(false)
 
   // ── AJO setup state ────────────────────────────────────────────────────────
+  const [folderConfig, setFolderConfig] = useState<FolderConfig | null>(null)
+  const [renaming, setRenaming] = useState(false)
   const [emailSample, setEmailSample] = useState('')
   const [smsSample, setSmsSample] = useState('')
   const [setupLoading, setSetupLoading] = useState(false)
@@ -32,32 +42,45 @@ export default function TemplateMigrationPage() {
 
   async function runExtraction() {
     try {
-      // Get initial counts
       const counts = await getTemplateCount()
       setTotal(counts.total)
       setStored(counts.stored)
 
-      if (counts.to_migrate === 0) {
-        setExtracting(false)
-        setStep('setup')
-        return
-      }
-
-      // Batch loop until ACC returns nothing new
-      let storedSoFar = counts.stored
-      while (!stopRef.current) {
-        const result = await extractTemplates()
-        if (result.total_found === 0) break
-        storedSoFar += result.extracted
-        setStored(storedSoFar)
-        if (result.total_found < 50) break // last page — done
+      if (counts.to_migrate > 0) {
+        let storedSoFar = counts.stored
+        while (!stopRef.current) {
+          const result = await extractTemplates()
+          if (result.total_found === 0) break
+          storedSoFar += result.extracted
+          setStored(storedSoFar)
+          if (result.total_found < 50) break
+        }
       }
 
       setExtracting(false)
-      if (!stopRef.current) setStep('setup')
+      if (!stopRef.current) {
+        await loadFolderConfig()
+        setStep('setup')
+      }
     } catch (err: unknown) {
       setExtractError(err instanceof Error ? err.message : 'Extraction failed')
       setExtracting(false)
+    }
+  }
+
+  async function loadFolderConfig() {
+    try {
+      const res = await fetch('/api/templates/folder-config', { credentials: 'include' })
+      if (res.ok) {
+        const cfg: FolderConfig = await res.json()
+        setFolderConfig(cfg)
+        if (cfg.configured) {
+          setEmailSample(cfg.email_folder_name ?? '')
+          setSmsSample(cfg.sms_folder_name ?? '')
+        }
+      }
+    } catch {
+      // non-fatal — just show the form
     }
   }
 
@@ -90,6 +113,7 @@ export default function TemplateMigrationPage() {
 
   // ── Render ─────────────────────────────────────────────────────────────────
   const pct = total > 0 ? Math.round((stored / total) * 100) : 0
+  const alreadyConfigured = folderConfig?.configured && !renaming
 
   return (
     <div className="min-h-screen bg-gray-50 px-6 py-8">
@@ -113,9 +137,7 @@ export default function TemplateMigrationPage() {
           </div>
 
           {extractError ? (
-            <div className="text-red-700 text-sm bg-red-50 border border-red-200 rounded-lg p-3">
-              {extractError}
-            </div>
+            <div className="text-red-700 text-sm bg-red-50 border border-red-200 rounded-lg p-3">{extractError}</div>
           ) : step === 'setup' ? (
             <p className="text-sm text-green-700">{stored} template{stored !== 1 ? 's' : ''} extracted and ready.</p>
           ) : (
@@ -127,10 +149,7 @@ export default function TemplateMigrationPage() {
               </p>
               {total > 0 && (
                 <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
-                  <div
-                    className="h-2 rounded-full bg-blue-500 transition-all duration-500"
-                    style={{ width: `${pct}%` }}
-                  />
+                  <div className="h-2 rounded-full bg-blue-500 transition-all duration-500" style={{ width: `${pct}%` }} />
                 </div>
               )}
               {extracting && (
@@ -149,65 +168,117 @@ export default function TemplateMigrationPage() {
             <h2 className="font-semibold text-gray-800">Set up AJO destination folders</h2>
           </div>
 
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4 text-xs text-blue-900">
-            <p className="font-semibold mb-1">Instructions:</p>
-            <ol className="list-decimal list-inside space-y-0.5">
-              <li>In AJO, open <strong>Content Templates</strong>.</li>
-              <li>Create a folder for Email and one for SMS.</li>
-              <li>Inside each, create one sample template with a name you'll remember.</li>
-              <li>Enter those exact names below.</li>
-            </ol>
-          </div>
-
-          <form onSubmit={handleSetup} className="space-y-4">
+          {/* Already configured — show summary + options */}
+          {alreadyConfigured ? (
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                Email sample template name
-              </label>
-              <input
-                type="text"
-                value={emailSample}
-                onChange={e => setEmailSample(e.target.value)}
-                placeholder="e.g. email sample"
-                required
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                SMS sample template name
-              </label>
-              <input
-                type="text"
-                value={smsSample}
-                onChange={e => setSmsSample(e.target.value)}
-                placeholder="e.g. sms sample"
-                required
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-
-            {setupError && (
-              <div className="text-red-700 text-sm bg-red-50 border border-red-200 rounded-lg p-3">
-                {setupError}
+              <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
+                <p className="text-sm font-medium text-green-800 mb-2">✓ Folders already configured</p>
+                <div className="text-sm text-green-700 space-y-1">
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Email folder</span>
+                    <span className="font-medium">{folderConfig?.email_folder_name}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">SMS folder</span>
+                    <span className="font-medium">{folderConfig?.sms_folder_name}</span>
+                  </div>
+                </div>
               </div>
-            )}
 
-            <button
-              type="submit"
-              disabled={setupLoading || !emailSample.trim() || !smsSample.trim()}
-              className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white font-medium py-2 px-4 rounded-lg text-sm transition-colors flex items-center justify-center gap-2"
-            >
-              {setupLoading && (
-                <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                </svg>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => navigate('/migration/template/analysis')}
+                  className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg text-sm transition-colors"
+                >
+                  Continue →
+                </button>
+                <button
+                  onClick={() => setRenaming(true)}
+                  className="px-4 py-2 text-sm text-gray-600 border border-gray-300 hover:border-gray-400 rounded-lg transition-colors"
+                >
+                  Rename folders
+                </button>
+              </div>
+            </div>
+          ) : (
+            /* Not configured or renaming — show the form */
+            <>
+              {renaming && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4 text-xs text-amber-800">
+                  Entering new names will overwrite the existing folder configuration.
+                </div>
               )}
-              {setupLoading ? 'Verifying…' : 'Verify & Continue →'}
-            </button>
-          </form>
+
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4 text-xs text-blue-900">
+                <p className="font-semibold mb-1">Instructions:</p>
+                <ol className="list-decimal list-inside space-y-0.5">
+                  <li>In AJO, open <strong>Content Templates</strong>.</li>
+                  <li>Create a folder for Email and one for SMS.</li>
+                  <li>Inside each, create one sample template with a name you'll remember.</li>
+                  <li>Enter those exact names below.</li>
+                </ol>
+              </div>
+
+              <form onSubmit={handleSetup} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                    Email sample template name
+                  </label>
+                  <input
+                    type="text"
+                    value={emailSample}
+                    onChange={e => setEmailSample(e.target.value)}
+                    placeholder="e.g. email sample"
+                    required
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                    SMS sample template name
+                  </label>
+                  <input
+                    type="text"
+                    value={smsSample}
+                    onChange={e => setSmsSample(e.target.value)}
+                    placeholder="e.g. sms sample"
+                    required
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+
+                {setupError && (
+                  <div className="text-red-700 text-sm bg-red-50 border border-red-200 rounded-lg p-3">{setupError}</div>
+                )}
+
+                <div className="flex gap-3">
+                  <button
+                    type="submit"
+                    disabled={setupLoading || !emailSample.trim() || !smsSample.trim()}
+                    className="flex-1 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white font-medium py-2 px-4 rounded-lg text-sm transition-colors flex items-center justify-center gap-2"
+                  >
+                    {setupLoading && (
+                      <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                    )}
+                    {setupLoading ? 'Verifying…' : 'Verify & Continue →'}
+                  </button>
+                  {renaming && (
+                    <button
+                      type="button"
+                      onClick={() => { setRenaming(false); setSetupError(null) }}
+                      className="px-4 py-2 text-sm text-gray-600 border border-gray-300 hover:border-gray-400 rounded-lg transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                </div>
+              </form>
+            </>
+          )}
         </div>
       </div>
     </div>

@@ -168,6 +168,37 @@ async def extract_templates(
 
 # ── Template migration routes ─────────────────────────────────────────────────
 
+@router.get("/api/templates/folder-config")
+async def get_folder_config(
+    acc_session: str | None = Cookie(default=None),
+    acc_user: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    login_id = await get_login_from_cookie(acc_session, db, acc_user)
+    if not login_id:
+        raise HTTPException(401, "Not authenticated")
+    dest_result = await db.execute(
+        select(DestinationConnection).where(DestinationConnection.authenticated == True)
+    )
+    dest = dest_result.scalar_one_or_none()
+    if not dest:
+        return {"configured": False}
+
+    rows = await db.execute(
+        select(TemplateFolderConfig).where(TemplateFolderConfig.destination_conn_id == dest.id)
+    )
+    configs = {r.channel: r for r in rows.scalars().all()}
+    if "email" not in configs or "sms" not in configs:
+        return {"configured": False}
+
+    return {
+        "configured": True,
+        "email_folder_name": configs["email"].folder_name,
+        "email_folder_id": configs["email"].parent_folder_id,
+        "sms_folder_name": configs["sms"].folder_name,
+        "sms_folder_id": configs["sms"].parent_folder_id,
+    }
+
 async def _require_ajo(db: AsyncSession) -> DestinationConnection:
     result = await db.execute(
         select(DestinationConnection).where(DestinationConnection.authenticated == True)
