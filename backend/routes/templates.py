@@ -134,19 +134,7 @@ async def extract_templates(
     log.info("Processing batch (batch_id=%s): %d template(s) starting at offset %d",
              batch_id, len(templates), start_line)
 
-    # Pre-load source_ids already in raw and parsed — one query each, used for all templates.
-    raw_ids_result = await db.execute(
-        select(AccTemplateRaw.source_id).where(AccTemplateRaw.login_id == login_id)
-    )
-    already_in_raw: set[str] = {r[0] for r in raw_ids_result.all()}
-
-    parsed_ids_result = await db.execute(
-        select(AccTemplateParsed.source_id).where(AccTemplateParsed.login_id == login_id)
-    )
-    already_in_parsed: set[str] = {r[0] for r in parsed_ids_result.all()}
-
     for meta in templates:
-        tid = meta["id"]
         try:
             if meta.get("internalName") in _EXCLUDED_INTERNAL_NAMES:
                 skipped += 1
@@ -157,38 +145,26 @@ async def extract_templates(
                     AccTemplateParsed.login_id == login_id,
                     AccTemplateParsed.source_id == meta["id"],
                 )
-                if not detail:
-                    detail = meta
-                await store_raw(db, login_id, detail, batch_id)
-                already_in_raw.add(tid)
-
-            # Step 2: store parsed only if not already parsed
-            if tid not in already_in_parsed:
-                if detail is None:
-                    # Raw exists in DB but parsed doesn't — reload from stored raw XML
-                    raw_row_result = await db.execute(
-                        select(AccTemplateRaw).where(
-                            AccTemplateRaw.login_id == login_id,
-                            AccTemplateRaw.source_id == tid,
-                        )
-                    )
-                    raw_row = raw_row_result.scalars().first()
-                    if raw_row and raw_row.raw_xml:
-                        from services.acc_soap import parse_delivery_detail
-                        detail = parse_delivery_detail(raw_row.raw_xml)
-                    else:
-                        detail = meta
-                await store_parsed(db, login_id, detail, batch_id)
-                already_in_parsed.add(tid)
-                await db.commit()
-                extracted += 1
-            else:
+            )
+            if existing.scalars().first() is not None:
                 skipped += 1
+                continue
+
+            detail = await fetch_delivery_detail(
+                soap_url, token, conn.security_token or "", meta["id"]
+            )
+            if not detail:
+                detail = meta
+
+            await store_raw(db, login_id, detail, batch_id)
+            await store_parsed(db, login_id, detail, batch_id)
+            await db.commit()
+            extracted += 1
 
         except Exception as exc:
             await db.rollback()
-            log.warning("Failed to process template id=%s: %s", tid, exc)
-            errors.append({"id": tid, "error": str(exc)})
+            log.warning("Failed to process template id=%s: %s", meta.get("id"), exc)
+            errors.append({"id": meta.get("id"), "error": str(exc)})
 
     return {"extracted": extracted, "total_found": len(templates), "skipped": skipped,
             "batch_id": batch_id, "errors": errors}
