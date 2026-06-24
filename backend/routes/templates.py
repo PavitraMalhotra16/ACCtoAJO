@@ -241,9 +241,9 @@ async def template_setup(
 
     headers = {
         "Authorization": f"Bearer {token}",
-        "x-api-key": dest.client_id or "",
-        "x-gw-ims-org-id": dest.org_id,
-        "x-sandbox-name": dest.sandbox_name or "prod",
+        "x-api-key": (dest.client_id or "").strip(),
+        "x-gw-ims-org-id": dest.org_id.strip(),
+        "x-sandbox-name": (dest.sandbox_name or "prod").strip(),
         "Content-Type": "application/json",
     }
     async with httpx.AsyncClient(timeout=30) as client:
