@@ -1,188 +1,114 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { extractTemplates, getStoredCount, getTemplateCount } from '../api/templates'
-
-type Phase = 'counting' | 'extracting' | 'done' | 'nothing' | 'error'
 
 export default function TemplateMigrationPage() {
   const navigate = useNavigate()
-  const [phase, setPhase]             = useState<Phase>('counting')
-  const [total, setTotal]             = useState(0)
-  const [stored, setStored]           = useState(0)
-  const [totalExtracted, setTotalExtracted] = useState(0)
-  const [errorMsg, setErrorMsg]       = useState<string | null>(null)
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const ranRef = useRef(false)
+  const [emailSample, setEmailSample] = useState('')
+  const [smsSample, setSmsSample] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    if (ranRef.current) return
-    ranRef.current = true
-
-    async function run() {
-      // Step 1 — get total count from ACC (minus already stored)
-      let accTotal = 0
-      try {
-        const { to_migrate } = await getTemplateCount()
-        accTotal = to_migrate
-        setTotal(to_migrate)
-      } catch (e: unknown) {
-        setErrorMsg(e instanceof Error ? e.message : 'Failed to count templates')
-        setPhase('error')
-        return
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setError(null)
+    setLoading(true)
+    try {
+      const res = await fetch('/api/templates/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          email_sample_name: emailSample.trim(),
+          sms_sample_name: smsSample.trim(),
+        }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.detail || `Error ${res.status}`)
       }
-
-      // Step 2 — start polling stored count every 2s
-      setPhase('extracting')
-      pollRef.current = setInterval(async () => {
-        try {
-          const { stored: s } = await getStoredCount()
-          setStored(s)
-        } catch {
-          // silent — extraction may still be running
-        }
-      }, 2000)
-
-      // Step 3 — loop extraction batch by batch until ACC returns nothing
-      let totalExtracted = 0
-      try {
-        while (true) {
-          const result = await extractTemplates()
-
-          if (result.total_found === 0) {
-            // ACC returned empty — nothing left to fetch
-            break
-          }
-
-          totalExtracted += result.extracted
-
-          if (result.extracted < result.total_found) {
-            // Partial batch (last page) — we're done
-            break
-          }
-        }
-      } catch (e: unknown) {
-        setErrorMsg(e instanceof Error ? e.message : 'Extraction failed')
-        setPhase('error')
-        return
-      } finally {
-        if (pollRef.current) clearInterval(pollRef.current)
-      }
-
-      setTotalExtracted(totalExtracted)
-
-      if (totalExtracted === 0 && accTotal === 0) {
-        setPhase('nothing')
-        return
-      }
-
-      setPhase('done')
+      navigate('/migration/template/analysis')
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Unknown error')
+    } finally {
+      setLoading(false)
     }
-
-    run()
-    return () => { if (pollRef.current) clearInterval(pollRef.current) }
-  }, [])
-
-  const progress = total > 0 ? Math.min(Math.round((stored / total) * 100), 100) : 0
+  }
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 px-6">
+    <div className="min-h-screen bg-gray-50 px-6 py-8">
+      <div className="max-w-2xl mx-auto">
+        <button
+          onClick={() => navigate('/migration/type')}
+          className="text-sm text-gray-500 hover:text-gray-800 mb-6 transition-colors"
+        >
+          ← Back
+        </button>
 
-      {/* Error */}
-      {phase === 'error' && (
-        <div className="flex flex-col items-center gap-4 max-w-sm text-center">
-          <div className="w-16 h-16 rounded-full bg-red-100 flex items-center justify-center">
-            <svg className="w-8 h-8 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </div>
-          <p className="text-gray-800 font-semibold">Something went wrong</p>
-          <p className="text-sm text-red-600">{errorMsg}</p>
-          <button
-            onClick={() => navigate('/migration/type')}
-            className="text-sm text-gray-500 hover:text-gray-800 mt-2 transition-colors"
-          >
-            ← Back
-          </button>
+        <h1 className="text-2xl font-bold text-gray-900 mb-2">Migrate Delivery Templates</h1>
+        <p className="text-gray-500 text-sm mb-6">
+          Before migrating, you need to set up destination folders in AJO.
+        </p>
+
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6 text-sm text-blue-900">
+          <p className="font-semibold mb-2">Setup instructions:</p>
+          <ol className="list-decimal list-inside space-y-1">
+            <li>In AJO, open <strong>Content Templates</strong>.</li>
+            <li>Create a folder for email templates and one for SMS templates.</li>
+            <li>Inside each folder, create one sample template with a name you'll remember.</li>
+            <li>Enter those exact sample template names below.</li>
+          </ol>
         </div>
-      )}
 
-      {/* Counting / Extracting */}
-      {(phase === 'counting' || phase === 'extracting') && (
-        <div className="flex flex-col items-center gap-6 w-full max-w-sm">
-          <svg className="animate-spin w-14 h-14 text-purple-600" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-80" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-          </svg>
+        <form onSubmit={handleSubmit} className="bg-white rounded-lg border border-gray-200 p-6 space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1.5">
+              Email sample template name
+            </label>
+            <input
+              type="text"
+              value={emailSample}
+              onChange={e => setEmailSample(e.target.value)}
+              placeholder="e.g. email sample"
+              required
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+            />
+          </div>
 
-          {phase === 'counting' && (
-            <p className="text-gray-500 text-sm">Fetching template count from ACC…</p>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1.5">
+              SMS sample template name
+            </label>
+            <input
+              type="text"
+              value={smsSample}
+              onChange={e => setSmsSample(e.target.value)}
+              placeholder="e.g. sms sample"
+              required
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+            />
+          </div>
+
+          {error && (
+            <div className="text-red-700 text-sm bg-red-50 border border-red-200 rounded-lg p-3">
+              {error}
+            </div>
           )}
 
-          {phase === 'extracting' && (
-            <>
-              <div className="text-center">
-                <p className="text-4xl font-bold text-purple-700 tabular-nums">
-                  {stored}
-                  <span className="text-xl text-gray-400 font-normal"> / {total}</span>
-                </p>
-                <p className="text-sm text-gray-500 mt-1">templates stored in database</p>
-              </div>
-
-              <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
-                <div
-                  className="bg-purple-500 h-2 rounded-full transition-all duration-500"
-                  style={{ width: `${progress}%` }}
-                />
-              </div>
-              <p className="text-xs text-gray-400">{progress}% complete</p>
-            </>
-          )}
-        </div>
-      )}
-
-      {/* Nothing to migrate */}
-      {phase === 'nothing' && (
-        <div className="flex flex-col items-center gap-5 max-w-sm text-center">
-          <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center">
-            <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-            </svg>
-          </div>
-          <div>
-            <p className="text-xl font-bold text-gray-900">No templates to migrate</p>
-            <p className="text-sm text-gray-500 mt-1">All templates are already stored in the database.</p>
-          </div>
           <button
-            onClick={() => navigate('/migration/type')}
-            className="mt-2 px-5 py-2 border border-gray-300 text-gray-700 hover:bg-gray-100 text-sm font-medium rounded-lg transition-colors"
+            type="submit"
+            disabled={loading || !emailSample.trim() || !smsSample.trim()}
+            className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white font-medium py-2 px-4 rounded-lg text-sm transition-colors flex items-center justify-center gap-2"
           >
-            ← Back to Migration
+            {loading && (
+              <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+            )}
+            {loading ? 'Verifying…' : 'Verify & Continue'}
           </button>
-        </div>
-      )}
-
-      {/* Done */}
-      {phase === 'done' && (
-        <div className="flex flex-col items-center gap-5 max-w-sm text-center">
-          <div className="w-16 h-16 rounded-full bg-green-100 flex items-center justify-center">
-            <svg className="w-9 h-9 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
-            </svg>
-          </div>
-          <div>
-            <p className="text-2xl font-bold text-gray-900">Done</p>
-            <p className="text-sm text-gray-500 mt-1">
-              {totalExtracted} template{totalExtracted !== 1 ? 's' : ''} extracted and stored in database
-            </p>
-          </div>
-          <button
-            onClick={() => navigate('/migration/type')}
-            className="mt-2 px-5 py-2 border border-gray-300 text-gray-700 hover:bg-gray-100 text-sm font-medium rounded-lg transition-colors"
-          >
-            ← Back to Migration
-          </button>
-        </div>
-      )}
+        </form>
+      </div>
     </div>
   )
 }
