@@ -66,6 +66,23 @@ async def _run_conversion_job(job_id: str, schemas: list[SchemaRef], acc_conn, l
             job["steps"].append(step)
 
             try:
+                # Refresh token per-schema so a long job never hits an expired token mid-run
+                async with AsyncSessionLocal() as db_refresh:
+                    result = await db_refresh.execute(
+                        select(SourceConnection).where(SourceConnection.login_id == login_id)
+                    )
+                    conn = result.scalar_one_or_none()
+                    if conn:
+                        token = await get_valid_acc_token(conn, db_refresh)
+
+                security_token = acc_conn.security_token or ""
+                headers = {
+                    "Content-Type": "text/xml; charset=utf-8",
+                    "SOAPAction": "xtk:queryDef#ExecuteQuery",
+                    "Cookie": f"__sessiontoken={token}",
+                    "X-Security-Token": security_token,
+                }
+
                 # Fetch raw XML via xtk:srcSchema
                 resp = await soap.post(
                     soap_url,
@@ -170,6 +187,11 @@ async def convert_start_all(
     acc = r.scalar_one_or_none()
     if not acc or not acc.authenticated:
         raise HTTPException(401, "ACC session not found")
+    try:
+        token = await get_valid_acc_token(acc, db)
+    except RuntimeError as e:
+        raise HTTPException(401, str(e))
+
     try:
         token = await get_valid_acc_token(acc, db)
     except RuntimeError as e:

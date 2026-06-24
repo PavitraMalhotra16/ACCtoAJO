@@ -438,7 +438,8 @@ def build_count_templates_envelope(session_token: str, security_token: str) -> b
         '<queryDef schema="nms:delivery" operation="count">'
         "<where>"
         '<condition expr="@isModel = 1"/>'
-        '<condition expr="@messageType = 0 OR @messageType = 1"/>'
+        '<condition expr="@builtIn != 1"/>'
+        '<condition expr="@internalName != \'notifyWkfToStop\'"/>'
         "</where>"
         "</queryDef>"
         "</urn:entity>"
@@ -482,7 +483,6 @@ def build_list_templates_envelope(
         '<condition expr="@isModel = 1"/>'
         '<condition expr="@builtIn != 1"/>'
         '<condition expr="@internalName != \'notifyWkfToStop\'"/>'
-        '<condition expr="@messageType = 0 OR @messageType = 1"/>'
         "</where>"
         '<orderBy><node expr="@id"/></orderBy>'
         "</queryDef>"
@@ -561,21 +561,37 @@ def parse_count_response(xml_text: str) -> int:
     return count
 
 
+_EXCLUDED_INTERNAL_NAMES = {"notifyWkfToStop"}
+
+
 def parse_template_list(xml_text: str) -> list[dict]:
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
         return []
     results = []
+    all_deliveries: list[dict] = []
     for el in root.iter():
         local = el.tag.split("}")[-1] if "}" in el.tag else el.tag
         if local != "delivery":
             continue
         delivery_id = el.get("id", el.get("_id", ""))
+        all_deliveries.append({
+            "id": delivery_id,
+            "internalName": el.get("internalName", ""),
+            "label": el.get("label", ""),
+            "isModel": el.get("isModel", "?"),
+            "builtIn": el.get("builtIn", "?"),
+            "messageType": el.get("messageType", "?"),
+        })
         if not delivery_id:
             continue
+        if el.get("internalName", "") in _EXCLUDED_INTERNAL_NAMES:
+            continue
         msg_type = el.get("messageType", "0")
-        channel = "sms" if msg_type == "1" else "email"
+        # ACC messageType: 0=email, 1=SMS (some instances use 1, others may differ)
+        # Treat anything non-zero as SMS to avoid missing user-created SMS templates.
+        channel = "sms" if msg_type not in ("", "0") else "email"
 
         # description
         desc_el = el.find("desc")
@@ -611,6 +627,8 @@ def parse_template_list(xml_text: str) -> list[dict]:
             "smsRaw": sms_raw,
             "rawXml": ET.tostring(el, encoding="unicode"),
         })
+    log.info("parse_template_list: raw delivery elements from ACC: %s", all_deliveries)
+    log.info("parse_template_list: accepted %d / %d deliveries", len(results), len(all_deliveries))
     return results
 
 

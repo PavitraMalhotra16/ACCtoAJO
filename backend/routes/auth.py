@@ -49,6 +49,11 @@ class AjoConnectRequest(BaseModel):
     client_secret: str
     sandbox_name: str
 
+    def model_post_init(self, __context: object) -> None:
+        self.org_id = self.org_id.strip()
+        self.client_id = self.client_id.strip()
+        self.sandbox_name = self.sandbox_name.strip()
+
 
 @router.post("/api/ajo/connect")
 async def ajo_connect(
