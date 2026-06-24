@@ -63,3 +63,11 @@ async def test_ensure_schema_columns_adds_missing_column():
     assert any("tenant_id" in s for s in alter_stmts), "Expected ALTER TABLE for tenant_id"
     assert not any("client_id" in s for s in alter_stmts), "client_id is already in DB, should not be altered"
     assert not any("org_id" in s for s in alter_stmts), "org_id is already in DB, should not be altered"
+
+
+def test_template_models_registered():
+    from db import Base, TemplateFolderConfig, TemplateMigrationRun, TemplateJobItem
+    tables = {m.class_.__tablename__ for m in Base.registry.mappers}
+    assert "template_folder_config" in tables
+    assert "template_migration_runs" in tables
+    assert "template_job_items" in tables

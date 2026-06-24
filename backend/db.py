@@ -7,7 +7,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, text
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -112,6 +112,50 @@ class TenantConfig(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class TemplateFolderConfig(Base):
+    __tablename__ = "template_folder_config"
+    __table_args__ = (UniqueConstraint("destination_conn_id", "channel", name="uq_folder_dest_channel"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    destination_conn_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    channel: Mapped[str] = mapped_column(String(10), nullable=False)          # 'email' | 'sms'
+    folder_name: Mapped[str] = mapped_column(String(255), nullable=False)     # user-typed sample name
+    parent_folder_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class TemplateMigrationRun(Base):
+    __tablename__ = "template_migration_runs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    destination_conn_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    login_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING")
+    placeholder_map: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON: {"recipient.email": "profile.workEmail.address", ...}
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TemplateJobItem(Base):
+    __tablename__ = "template_job_items"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)  # = TemplateMigrationRun.run_id
+    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    internal_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    channel: Mapped[str] = mapped_column(String(10), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING")
+    current_step: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    current_step_order: Mapped[int] = mapped_column(Integer, default=0)
+    enriched_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ajo_template_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error_step: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 class AccTemplateRaw(Base):
     """Stores the raw delivery XML exactly as returned from ACC SOAP API."""
     __tablename__ = "acc_deliverytemplate_raw"
@@ -127,6 +171,9 @@ class AccTemplateRaw(Base):
 class AccTemplateParsed(Base):
     """Stores the parsed JSON extracted from the raw delivery XML."""
     __tablename__ = "acc_deliverytemplate_parsed"
+    __table_args__ = (
+        UniqueConstraint("login_id", "source_id", name="uq_template_parsed_login_source"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     login_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
@@ -204,6 +251,8 @@ async def init_db():
             "ALTER TABLE schema_job_items ADD COLUMN IF NOT EXISTS fields_added INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE acc_deliverytemplate_raw ADD COLUMN IF NOT EXISTS batch_id VARCHAR(255)",
             "ALTER TABLE acc_deliverytemplate_parsed ADD COLUMN IF NOT EXISTS batch_id VARCHAR(255)",
+            "ALTER TABLE acc_deliverytemplate_parsed DROP CONSTRAINT IF EXISTS uq_template_parsed_login_source",
+            "ALTER TABLE acc_deliverytemplate_parsed ADD CONSTRAINT uq_template_parsed_login_source UNIQUE (login_id, source_id)",
             "ALTER TABLE source_connections ADD COLUMN IF NOT EXISTS session_expires_at TIMESTAMPTZ",
             "ALTER TABLE source_connections ADD COLUMN IF NOT EXISTS client_id VARCHAR(255)",
             "ALTER TABLE source_connections ADD COLUMN IF NOT EXISTS encrypted_credentials TEXT",

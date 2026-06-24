@@ -8,16 +8,27 @@ GET  /api/templates               — list stored templates with their payload-r
 GET  /api/templates/{id}          — single template payload-ready fields
 """
 
+import asyncio
 import json
 import logging
+import re
 import uuid
+from datetime import datetime, timezone
 
+import httpx
 from fastapi import APIRouter, Cookie, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db import AccTemplateRaw, AccTemplateParsed, SourceConnection, get_db
-from core.security import get_login_from_cookie, get_valid_acc_token
+from db import (
+    AccTemplateRaw, AccTemplateParsed, AsyncSessionLocal, SourceConnection, get_db,
+    DestinationConnection, TemplateFolderConfig,
+    TemplateMigrationRun, TemplateJobItem,
+)
+from core.security import get_login_from_cookie
+from pipeline.placeholder_config import RECIPIENT_MAPPINGS, get_ajo_mapping
+from pipeline.template_runner import run_template_migration
 from services.template_extractor import (
     count_templates,
     fetch_delivery_detail,
@@ -28,6 +39,9 @@ from services.template_extractor import (
 
 log = logging.getLogger("acc_backend.templates")
 router = APIRouter()
+
+# Templates that must never be extracted or migrated regardless of what ACC returns
+_EXCLUDED_INTERNAL_NAMES = {"notifyWkfToStop"}
 
 
 async def _require_acc(db: AsyncSession, login_id: str | None) -> tuple[SourceConnection, str]:
@@ -50,6 +64,19 @@ def _soap_url(instance_url: str) -> str:
     return instance_url.rstrip("/") + "/nl/jsp/soaprouter.jsp"
 
 
+async def _count_valid_stored(db: AsyncSession, login_id: str) -> int:
+    """Count stored templates excluding any that carry an excluded internalName.
+    Used as the SOAP pagination cursor so excluded rows don't skew the offset."""
+    result = await db.execute(
+        select(AccTemplateParsed.template_data)
+        .where(AccTemplateParsed.login_id == login_id)
+    )
+    return sum(
+        1 for td in result.scalars().all()
+        if json.loads(td or "{}").get("internalName") not in _EXCLUDED_INTERNAL_NAMES
+    )
+
+
 @router.get("/api/templates/stored-count")
 async def get_stored_count(
     acc_session: str | None = Cookie(default=None),
@@ -59,11 +86,7 @@ async def get_stored_count(
     login_id = await get_login_from_cookie(acc_session, db, acc_user)
     if not login_id:
         return {"stored": 0}  # session may have briefly expired during polling — return 0 silently
-    result = await db.execute(
-        select(func.count()).select_from(AccTemplateParsed)
-        .where(AccTemplateParsed.login_id == login_id)
-    )
-    return {"stored": result.scalar_one()}
+    return {"stored": await _count_valid_stored(db, login_id)}
 
 
 @router.get("/api/templates/count")
@@ -77,11 +100,7 @@ async def get_template_count(
     total = await count_templates(
         _soap_url(conn.instance_url), token, conn.security_token or ""
     )
-    stored_result = await db.execute(
-        select(func.count()).select_from(AccTemplateParsed)
-        .where(AccTemplateParsed.login_id == login_id)
-    )
-    stored = stored_result.scalar_one()
+    stored = await _count_valid_stored(db, login_id)
     to_migrate = max(0, total - stored)
     return {"total": total, "stored": stored, "to_migrate": to_migrate}
 
@@ -96,12 +115,9 @@ async def extract_templates(
     conn, token = await _require_acc(db, login_id)
     soap_url = _soap_url(conn.instance_url)
 
-    # Use raw count as cursor — next batch starts after all templates already fetched from ACC
-    stored_result = await db.execute(
-        select(func.count()).select_from(AccTemplateRaw)
-        .where(AccTemplateRaw.login_id == login_id)
-    )
-    start_line = stored_result.scalar_one()
+    # Cursor = count of valid (non-excluded) stored templates so the SOAP offset stays correct
+    # even if excluded rows exist in the DB from a previous extraction run
+    start_line = await _count_valid_stored(db, login_id)
 
     templates = await fetch_template_list(
         soap_url, token, conn.security_token or "", start_line=start_line
@@ -132,12 +148,14 @@ async def extract_templates(
     for meta in templates:
         tid = meta["id"]
         try:
-            detail = None
+            if meta.get("internalName") in _EXCLUDED_INTERNAL_NAMES:
+                skipped += 1
+                continue
 
-            # Step 1: store raw only if not already extracted
-            if tid not in already_in_raw:
-                detail = await fetch_delivery_detail(
-                    soap_url, token, conn.security_token or "", tid
+            existing = await db.execute(
+                select(AccTemplateParsed).where(
+                    AccTemplateParsed.login_id == login_id,
+                    AccTemplateParsed.source_id == meta["id"],
                 )
                 if not detail:
                     detail = meta
@@ -176,8 +194,28 @@ async def extract_templates(
             "batch_id": batch_id, "errors": errors}
 
 
-@router.get("/api/templates")
-async def list_templates(
+@router.delete("/api/templates/stored")
+async def clear_stored_templates(
+    acc_session: str | None = Cookie(default=None),
+    acc_user: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete all previously stored templates for this user so extraction always starts fresh."""
+    from sqlalchemy import delete as sa_delete
+    login_id = await get_login_from_cookie(acc_session, db, acc_user)
+    if not login_id:
+        raise HTTPException(401, "Not authenticated")
+    await db.execute(sa_delete(AccTemplateParsed).where(AccTemplateParsed.login_id == login_id))
+    await db.execute(sa_delete(AccTemplateRaw).where(AccTemplateRaw.login_id == login_id))
+    await db.commit()
+    log.info("Cleared stored templates for login_id=%s", login_id)
+    return {"cleared": True}
+
+
+# ── Template migration routes ─────────────────────────────────────────────────
+
+@router.get("/api/templates/folder-config")
+async def get_folder_config(
     acc_session: str | None = Cookie(default=None),
     acc_user: str | None = Cookie(default=None),
     db: AsyncSession = Depends(get_db),
@@ -185,24 +223,175 @@ async def list_templates(
     login_id = await get_login_from_cookie(acc_session, db, acc_user)
     if not login_id:
         raise HTTPException(401, "Not authenticated")
-    result = await db.execute(
-        select(AccTemplateNormalized)
-        .where(AccTemplateNormalized.login_id == login_id)
-        .order_by(AccTemplateNormalized.created_at.desc())
+    dest_result = await db.execute(
+        select(DestinationConnection).where(DestinationConnection.authenticated == True)
     )
-    rows = result.scalars().all()
-    return [
-        {
-            "id": r.id,
-            "payloadFields": json.loads(r.payload_fields_json) if r.payload_fields_json else None,
-        }
-        for r in rows
+    dest = dest_result.scalar_one_or_none()
+    if not dest:
+        return {"configured": False}
+
+    rows = await db.execute(
+        select(TemplateFolderConfig).where(TemplateFolderConfig.destination_conn_id == dest.id)
+    )
+    configs = {r.channel: r for r in rows.scalars().all()}
+    if "email" not in configs or "sms" not in configs:
+        return {"configured": False}
+
+    return {
+        "configured": True,
+        "email_folder_name": configs["email"].folder_name,
+        "email_folder_id": configs["email"].parent_folder_id,
+        "sms_folder_name": configs["sms"].folder_name,
+        "sms_folder_id": configs["sms"].parent_folder_id,
+    }
+
+async def _require_ajo(db: AsyncSession) -> DestinationConnection:
+    result = await db.execute(
+        select(DestinationConnection).where(DestinationConnection.authenticated == True)
+    )
+    dest = result.scalar_one_or_none()
+    if not dest:
+        raise HTTPException(400, "AJO not connected — connect AJO first")
+    return dest
+
+
+async def _get_valid_ajo_token(dest: DestinationConnection, db: AsyncSession) -> str:
+    from pipeline.handlers import get_valid_access_token  # deferred to avoid circular import
+    return await get_valid_access_token(dest, db)
+
+
+class SetupRequest(BaseModel):
+    email_sample_name: str
+    sms_sample_name: str
+
+
+@router.post("/api/templates/setup")
+async def template_setup(
+    body: SetupRequest,
+    acc_session: str | None = Cookie(default=None),
+    acc_user: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    login_id = await get_login_from_cookie(acc_session, db, acc_user)
+    if not login_id:
+        raise HTTPException(401, "Not authenticated")
+    dest = await _require_ajo(db)
+    token = await _get_valid_ajo_token(dest, db)
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "x-api-key": (dest.client_id or "").strip(),
+        "x-gw-ims-org-id": dest.org_id.strip(),
+        "x-sandbox-name": (dest.sandbox_name or "prod").strip(),
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            "https://platform.adobe.io/ajo/content/templates",
+            headers=headers,
+            params={"orderBy": "-modifiedAt", "limit": 200},
+        )
+    if resp.status_code != 200:
+        raise HTTPException(502, f"AJO GET /templates failed: {resp.status_code} {resp.text[:200]}")
+
+    items = resp.json().get("items", [])
+    name_to_folder: dict[str, str] = {
+        item["name"]: item.get("parentFolderId", "")
+        for item in items
+        if item.get("parentFolderId")
+    }
+
+    results = {}
+    for channel, sample_name in [("email", body.email_sample_name), ("sms", body.sms_sample_name)]:
+        folder_id = name_to_folder.get(sample_name)
+        if not folder_id:
+            raise HTTPException(
+                404,
+                f"No template named '{sample_name}' with a parentFolderId found in AJO. "
+                "Create the sample template inside a folder first."
+            )
+        existing = await db.execute(
+            select(TemplateFolderConfig).where(
+                TemplateFolderConfig.destination_conn_id == dest.id,
+                TemplateFolderConfig.channel == channel,
+            )
+        )
+        cfg = existing.scalar_one_or_none()
+        if cfg:
+            cfg.parent_folder_id = folder_id
+            cfg.folder_name = sample_name
+        else:
+            db.add(TemplateFolderConfig(
+                destination_conn_id=dest.id,
+                channel=channel,
+                folder_name=sample_name,
+                parent_folder_id=folder_id,
+            ))
+        results[channel] = folder_id
+
+    await db.commit()
+    return {"email_folder_id": results["email"], "sms_folder_id": results["sms"]}
+
+
+@router.get("/api/templates/analysis")
+async def template_analysis(
+    acc_session: str | None = Cookie(default=None),
+    acc_user: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    login_id = await get_login_from_cookie(acc_session, db, acc_user)
+    if not login_id:
+        raise HTTPException(401, "Not authenticated")
+
+    result = await db.execute(
+        select(AccTemplateParsed).where(AccTemplateParsed.login_id == login_id)
+    )
+    rows = [
+        r for r in result.scalars().all()
+        if json.loads(r.template_data or "{}").get("internalName") not in _EXCLUDED_INTERNAL_NAMES
     ]
 
+    re_recipient = re.compile(r"<%=\s*(recipient\.\w+)\s*%>")
+    re_target = re.compile(r"<%=\s*(targetData\.\w+)\s*%>")
 
-@router.get("/api/templates/{template_id}")
-async def get_template(
-    template_id: str,
+    unique_recipient: dict[str, str] = {}
+    unique_target: dict[str, str] = {}
+
+    for row in rows:
+        if not row.template_data:
+            continue
+        parsed = json.loads(row.template_data)
+        text = (parsed.get("htmlBody", "") or "") + " " + (parsed.get("smsContent", "") or "")
+        for m in re_recipient.finditer(text):
+            field = m.group(1)
+            if field not in unique_recipient:
+                # Use config mapping if known; otherwise show raw field for user to edit
+                unique_recipient[field] = get_ajo_mapping(field) or field
+        for m in re_target.finditer(text):
+            field = m.group(1)
+            if field not in unique_target:
+                # No config for targetData — show raw field, user decides the AJO path
+                unique_target[field] = field
+
+    return {
+        "recipient": [
+            {"acc": f"<%= {k} %>", "field": k, "ajo": v}
+            for k, v in sorted(unique_recipient.items())
+        ],
+        "targetData": [
+            {"acc": f"<%= {k} %>", "field": k, "ajo": v}
+            for k, v in sorted(unique_target.items())
+        ],
+    }
+
+
+class MigrateRequest(BaseModel):
+    placeholder_map: dict[str, str]
+
+
+@router.post("/api/templates/migrate")
+async def template_migrate(
+    body: MigrateRequest,
     acc_session: str | None = Cookie(default=None),
     acc_user: str | None = Cookie(default=None),
     db: AsyncSession = Depends(get_db),
@@ -210,16 +399,152 @@ async def get_template(
     login_id = await get_login_from_cookie(acc_session, db, acc_user)
     if not login_id:
         raise HTTPException(401, "Not authenticated")
-    result = await db.execute(
-        select(AccTemplateNormalized).where(
-            AccTemplateNormalized.id == template_id,
-            AccTemplateNormalized.login_id == login_id,
+    dest = await _require_ajo(db)
+
+    templates_result = await db.execute(
+        select(AccTemplateParsed).where(AccTemplateParsed.login_id == login_id)
+    )
+    templates = [
+        t for t in templates_result.scalars().all()
+        if json.loads(t.template_data or "{}").get("internalName") not in _EXCLUDED_INTERNAL_NAMES
+    ]
+    if not templates:
+        raise HTTPException(400, "No templates found in acc_deliverytemplate_parsed for this user")
+
+    # Find source_ids that already completed successfully in any prior run for this user —
+    # so we never push the same template twice.
+    completed_result = await db.execute(
+        select(TemplateJobItem.source_id)
+        .join(TemplateMigrationRun, TemplateJobItem.run_id == TemplateMigrationRun.run_id)
+        .where(
+            TemplateMigrationRun.login_id == login_id,
+            TemplateJobItem.status == "COMPLETED",
         )
     )
-    row = result.scalar_one_or_none()
-    if not row:
-        raise HTTPException(404, "Template not found")
+    already_done: set[str] = {row[0] for row in completed_result.all()}
+
+    run_id = str(uuid.uuid4())
+    run = TemplateMigrationRun(
+        run_id=run_id,
+        destination_conn_id=dest.id,
+        login_id=login_id,
+        status="RUNNING",
+        placeholder_map=json.dumps(body.placeholder_map),
+    )
+    db.add(run)
+    await db.flush()
+
+    items: list[dict] = []
+    skipped_already_done = 0
+    for tmpl in templates:
+        parsed = json.loads(tmpl.template_data) if tmpl.template_data else {}
+        channel = parsed.get("channel", "email")
+
+        # Already fully migrated — skip entirely, no DB row needed
+        if tmpl.source_id in already_done:
+            skipped_already_done += 1
+            continue
+
+        # Unsupported channel — skip without creating a job row
+        if channel not in ("email", "sms"):
+            continue
+
+        job_item = TemplateJobItem(
+            run_id=run_id,
+            source_id=tmpl.source_id,
+            internal_name=parsed.get("internalName"),
+            channel=channel,
+            status="PENDING",
+        )
+        db.add(job_item)
+        await db.flush()
+
+        items.append({
+            "id": job_item.id,
+            "source_id": tmpl.source_id,
+            "login_id": login_id,
+            "destination_conn_id": dest.id,
+            "channel": channel,
+        })
+
+    await db.commit()
+
+    if not items:
+        # Nothing new to migrate — mark run complete immediately
+        async with AsyncSessionLocal() as close_db:
+            res = await close_db.execute(select(TemplateMigrationRun).where(TemplateMigrationRun.run_id == run_id))
+            run_row = res.scalar_one()
+            run_row.status = "COMPLETED"
+            run_row.completed_at = datetime.now(timezone.utc)
+            await close_db.commit()
+        return {"run_id": run_id, "total": 0, "skipped_already_migrated": skipped_already_done}
+
+    asyncio.create_task(
+        run_template_migration(run_id, items, body.placeholder_map)
+    )
+    return {"run_id": run_id, "total": len(items), "skipped_already_migrated": skipped_already_done}
+
+
+@router.get("/api/templates/runs/{run_id}/status")
+async def template_run_status(
+    run_id: str,
+    acc_session: str | None = Cookie(default=None),
+    acc_user: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    login_id = await get_login_from_cookie(acc_session, db, acc_user)
+    if not login_id:
+        raise HTTPException(401, "Not authenticated")
+
+    run_result = await db.execute(
+        select(TemplateMigrationRun).where(TemplateMigrationRun.run_id == run_id)
+    )
+    run = run_result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(404, f"Run {run_id} not found")
+
+    counts = await db.execute(
+        select(
+            TemplateJobItem.channel,
+            TemplateJobItem.status,
+            func.count().label("cnt"),
+        )
+        .where(TemplateJobItem.run_id == run_id)
+        .group_by(TemplateJobItem.channel, TemplateJobItem.status)
+    )
+    rows = counts.all()
+
+    def _tally(channel: str) -> dict:
+        total = completed = failed = 0
+        for r in rows:
+            if r.channel == channel:
+                total += r.cnt
+                if r.status == "COMPLETED":
+                    completed += r.cnt
+                elif r.status == "FAILED":
+                    failed += r.cnt
+        return {"total": total, "completed": completed, "failed": failed}
+
+    failures = []
+    if run.status == "COMPLETED":
+        fail_result = await db.execute(
+            select(TemplateJobItem).where(
+                TemplateJobItem.run_id == run_id,
+                TemplateJobItem.status == "FAILED",
+            )
+        )
+        for fi in fail_result.scalars().all():
+            failures.append({
+                "source_id": fi.source_id,
+                "internal_name": fi.internal_name,
+                "channel": fi.channel,
+                "error_step": fi.error_step,
+                "error_message": fi.error_message,
+            })
+
     return {
-        "id": row.id,
-        "payloadFields": json.loads(row.payload_fields_json) if row.payload_fields_json else None,
+        "status": run.status,
+        "email": _tally("email"),
+        "sms": _tally("sms"),
+        "failures": failures,
     }
