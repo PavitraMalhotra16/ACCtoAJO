@@ -14,8 +14,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import DestinationConnection, SourceConnection, UserSession, get_db
-from core.security import encrypt, get_login_from_cookie
+from core.security import SESSION_TTL_DAYS as _SESSION_TTL_DAYS, encrypt, get_login_from_cookie
 from services.acc_soap import (
+    build_bearer_token_logon_envelope,
     build_logon_envelope,
     build_test_cnx_envelope,
     parse_fault,
@@ -25,8 +26,7 @@ from services.acc_soap import (
 log = logging.getLogger("acc_backend.auth")
 router = APIRouter()
 
-SESSION_TTL_DAYS = 7
-USER_COOKIE_TTL_DAYS = 365
+SESSION_TTL_DAYS = _SESSION_TTL_DAYS
 IMS_TOKEN_URL = "https://ims-na1.adobelogin.com/ims/token/v3"
 IMS_SCOPES = "openid,AdobeID,read_organizations,additional_info.projectedProductContext,session"
 
@@ -211,11 +211,15 @@ async def acc_connect(
         result = await db.execute(select(SourceConnection).where(SourceConnection.login_id == body.login))
         conn = result.scalar_one_or_none()
         now = datetime.now(timezone.utc)
+        # ACC doesn't tell us when the session expires — use 23h as a safe default
+        # (ACC default session lifetime is 24h; 23h gives a 1h proactive refresh window)
+        classic_session_expires_at = now + timedelta(hours=23)
         if conn:
             conn.encrypted_password = encrypt(body.password)
             conn.instance_url = body.instance_url
             conn.session_token = session_token
             conn.security_token = security_token
+            conn.session_expires_at = classic_session_expires_at
             conn.authenticated = True
             conn.last_authenticated_at = now
         else:
@@ -225,6 +229,7 @@ async def acc_connect(
                 encrypted_password=encrypt(body.password),
                 session_token=session_token,
                 security_token=security_token,
+                session_expires_at=classic_session_expires_at,
                 authenticated=True,
                 last_authenticated_at=now,
             )
@@ -239,8 +244,6 @@ async def acc_connect(
         await db.commit()
         response.set_cookie(key="acc_session", value=session_id, httponly=True, samesite="lax",
                             max_age=SESSION_TTL_DAYS * 24 * 3600)
-        response.set_cookie(key="acc_user", value=body.login, httponly=True, samesite="lax",
-                            max_age=USER_COOKIE_TTL_DAYS * 24 * 3600)
         return {"success": True, "authenticated": True, "login": body.login}
 
     elif body.auth_type == "technical":
@@ -268,41 +271,75 @@ async def acc_connect(
         if not access_token:
             raise HTTPException(401, "IMS did not return an access token")
 
-        login_id = body.client_id
+        expires_in = int(payload.get("expires_in", 3600))
+        if expires_in > 86_400:
+            expires_in //= 1000   # IMS sometimes returns milliseconds
         now = datetime.now(timezone.utc)
+        token_expires_at = now + timedelta(seconds=expires_in)
+
+        # Exchange IMS Bearer token for ACC SOAP session/security tokens
+        # so all subsequent SOAP calls work identically to classic auth.
+        soap_url = body.instance_url.rstrip("/") + "/nl/jsp/soaprouter.jsp"
+        async with httpx.AsyncClient(timeout=30.0) as soap_client:
+            try:
+                bearer_resp = await soap_client.post(
+                    soap_url,
+                    content=build_bearer_token_logon_envelope(access_token),
+                    headers={
+                        "Content-Type": "text/xml; charset=utf-8",
+                        "SOAPAction": "xtk:session#BearerTokenLogon",
+                    },
+                )
+            except httpx.RequestError:
+                raise HTTPException(502, "Cannot reach Adobe Campaign Classic")
+        fault = parse_fault(bearer_resp.text)
+        if bearer_resp.status_code != 200 or fault:
+            raise HTTPException(401, fault or "BearerTokenLogon failed — check instance URL and IMS scopes")
+        session_token, security_token = parse_logon_response(bearer_resp.text)
+        if not session_token:
+            raise HTTPException(401, "BearerTokenLogon did not return a session token")
+
+        login_id = body.client_id
         result = await db.execute(select(SourceConnection).where(SourceConnection.login_id == login_id))
         conn = result.scalar_one_or_none()
         if conn:
-            conn.encrypted_password = encrypt(body.client_secret)
+            conn.auth_type = "technical"
             conn.instance_url = body.instance_url
-            conn.session_token = access_token
-            conn.security_token = ""
+            conn.client_id = body.client_id
+            conn.encrypted_credentials = encrypt(f"{body.client_id}:{body.client_secret}")
+            conn.encrypted_access_token = encrypt(access_token)
+            conn.token_expires_at = token_expires_at
+            conn.session_token = session_token
+            conn.security_token = security_token
             conn.authenticated = True
             conn.last_authenticated_at = now
         else:
             conn = SourceConnection(
                 login_id=login_id,
+                auth_type="technical",
                 instance_url=body.instance_url,
-                encrypted_password=encrypt(body.client_secret),
-                session_token=access_token,
-                security_token="",
+                client_id=body.client_id,
+                encrypted_credentials=encrypt(f"{body.client_id}:{body.client_secret}"),
+                encrypted_access_token=encrypt(access_token),
+                token_expires_at=token_expires_at,
+                session_token=session_token,
+                security_token=security_token,
                 authenticated=True,
                 last_authenticated_at=now,
             )
             db.add(conn)
 
+        # Session cookie so frontend knows who is logged in (same as classic)
         session_id = str(uuid.uuid4())
         db.add(UserSession(
             id=session_id,
             login_id=login_id,
-            expires_at=datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS),
+            expires_at=now + timedelta(days=SESSION_TTL_DAYS),
         ))
         await db.commit()
         response.set_cookie(key="acc_session", value=session_id, httponly=True, samesite="lax",
                             max_age=SESSION_TTL_DAYS * 24 * 3600)
-        response.set_cookie(key="acc_user", value=login_id, httponly=True, samesite="lax",
-                            max_age=USER_COOKIE_TTL_DAYS * 24 * 3600)
-        return {"success": True, "authenticated": True, "login": login_id}
+        return {"success": True, "authenticated": True, "login": login_id, "expires_in": expires_in}
 
     else:
         raise HTTPException(400, f"Unknown auth_type: {body.auth_type}")
@@ -321,7 +358,6 @@ async def acc_disconnect(
             await db.delete(session)
             await db.commit()
     response.delete_cookie("acc_session")
-    response.delete_cookie("acc_user")
     return {"success": True}
 
 

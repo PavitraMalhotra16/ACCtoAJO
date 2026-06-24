@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     # Schema storage
     schema_storage_dir: str = "schema_files"
 
+    # Template extraction
+    template_page_size: int = 100
+
     # General
     debug: bool = False
 

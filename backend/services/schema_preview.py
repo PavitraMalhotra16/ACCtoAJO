@@ -70,6 +70,21 @@ def parse_schema_preview(xml_text: str, namespace: str, name: str) -> dict:
         else:
             unique_keys.append({"fields": fields})
 
+    # Links (foreign keys to other schemas)
+    links = []
+    for el in main_el:
+        if _local(el.tag) != "element" or el.get("type") != "link":
+            continue
+        src = ""
+        for join in el:
+            if _local(join.tag) == "join":
+                src = join.get("xpath-src", "").lstrip("@")
+        links.append({
+            "name": el.get("name"),
+            "targetSchema": el.get("target"),
+            "sourceField": src,
+        })
+
     return {
         "namespace": namespace,
         "name": name,
@@ -83,4 +98,5 @@ def parse_schema_preview(xml_text: str, namespace: str, name: str) -> dict:
             "primaryKeys": primary_keys,
             "uniqueKeys": unique_keys,
         },
+        "links": links,
     }

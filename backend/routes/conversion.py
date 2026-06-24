@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from services.acc_soap import build_schema_inventory_envelope, build_srcschema_get_envelope, parse_fault, parse_schema_inventory
 from db import AsyncSessionLocal, ConvertedSchema, SourceConnection, get_db
 from services.schema_inspector import parse_schema_to_xdm
-from core.security import get_login_from_cookie
+from core.security import get_login_from_cookie, get_valid_acc_token
 
 log = logging.getLogger("acc_backend.conversion")
 router = APIRouter(prefix="/api/convert")
@@ -41,15 +41,16 @@ class ConvertStartRequest(BaseModel):
     schemas: list[SchemaRef]
 
 
-async def _run_conversion_job(job_id: str, schemas: list[SchemaRef], acc_conn, login_id: str):
+async def _run_conversion_job(job_id: str, schemas: list[SchemaRef], acc_conn, login_id: str, token: str):
     job = _jobs[job_id]
     job["status"] = "running"
     soap_url = acc_conn.instance_url.rstrip("/") + "/nl/jsp/soaprouter.jsp"
+    security_token = acc_conn.security_token or ""
     headers = {
         "Content-Type": "text/xml; charset=utf-8",
         "SOAPAction": "xtk:queryDef#ExecuteQuery",
-        "Cookie": f"__sessiontoken={acc_conn.session_token}",
-        "X-Security-Token": acc_conn.security_token,
+        "Cookie": f"__sessiontoken={token}",
+        "X-Security-Token": security_token,
     }
 
     async with httpx.AsyncClient(timeout=SOAP_TIMEOUT) as soap:
@@ -69,7 +70,7 @@ async def _run_conversion_job(job_id: str, schemas: list[SchemaRef], acc_conn, l
                 resp = await soap.post(
                     soap_url,
                     content=build_srcschema_get_envelope(
-                        acc_conn.session_token, acc_conn.security_token, s.namespace, s.name),
+                        token, security_token, s.namespace, s.name),
                     headers=headers,
                 )
                 fault = parse_fault(resp.text)
@@ -128,14 +129,16 @@ async def convert_start(
 
     r = await db.execute(select(SourceConnection).where(SourceConnection.login_id == login_id))
     acc = r.scalar_one_or_none()
-    if not acc or not acc.session_token:
+    if not acc or not acc.authenticated:
         raise HTTPException(401, "ACC session not found")
+    try:
+        token = await get_valid_acc_token(acc, db)
+    except RuntimeError as e:
+        raise HTTPException(401, str(e))
 
     if not body.schemas:
         raise HTTPException(400, "No schemas selected")
 
-    # Always (re-)extract the selected schemas. A re-extract overwrites the prior
-    # extraction so changes made in ACC are picked up before the AJO push.
     schemas_to_run = list(body.schemas)
 
     job_id = str(uuid.uuid4())
@@ -149,7 +152,7 @@ async def convert_start(
         "failed_count":   0,
     }
 
-    asyncio.create_task(_run_conversion_job(job_id, schemas_to_run, acc, login_id))
+    asyncio.create_task(_run_conversion_job(job_id, schemas_to_run, acc, login_id, token))
     return {"job_id": job_id, "message": "started", "skipped": []}
 
 

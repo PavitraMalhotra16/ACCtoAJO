@@ -32,7 +32,7 @@ export default function ConfigPage() {
   }, [])
 
   function handleMigrate() {
-    navigate('/migration/select')
+    navigate('/migration/type')
   }
 
   return (

@@ -58,3 +58,12 @@ export async function getAjoStatus(): Promise<{ connected: boolean; org_id: stri
   if (!res.ok) return { connected: false, org_id: null, sandbox_name: null }
   return res.json()
 }
+
+export async function getSchemaDependencies(): Promise<{
+  dependents_of: Record<string, string[]>
+  dependent_set: string[]
+}> {
+  const res = await fetch(`${BASE}/api/schemas/dependencies`, { credentials: 'include' })
+  if (!res.ok) return { dependents_of: {}, dependent_set: [] }
+  return res.json()
+}
