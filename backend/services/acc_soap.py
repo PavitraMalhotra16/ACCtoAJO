@@ -439,6 +439,7 @@ def build_count_templates_envelope(session_token: str, security_token: str) -> b
         "<where>"
         '<condition expr="@isModel = 1"/>'
         '<condition expr="@builtIn != 1"/>'
+        '<condition expr="@internalName != \'notifyWkfToStop\'"/>'
         "</where>"
         "</queryDef>"
         "</urn:entity>"
