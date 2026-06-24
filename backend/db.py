@@ -28,9 +28,17 @@ class SourceConnection(Base):
     login_id: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     auth_type: Mapped[str] = mapped_column(String(50), default="classic")
     instance_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # classic auth
     encrypted_password: Mapped[str | None] = mapped_column(Text, nullable=True)
     session_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     security_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # classic auth — SOAP session expiry (ACC default ~24h, no expiry returned by Logon)
+    session_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # technical auth (mirrors DestinationConnection pattern)
+    client_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    encrypted_credentials: Mapped[str | None] = mapped_column(Text, nullable=True)
+    encrypted_access_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     authenticated: Mapped[bool] = mapped_column(Boolean, default=False)
     last_authenticated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -196,6 +204,11 @@ async def init_db():
             "ALTER TABLE schema_job_items ADD COLUMN IF NOT EXISTS fields_added INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE acc_deliverytemplate_raw ADD COLUMN IF NOT EXISTS batch_id VARCHAR(255)",
             "ALTER TABLE acc_deliverytemplate_parsed ADD COLUMN IF NOT EXISTS batch_id VARCHAR(255)",
+            "ALTER TABLE source_connections ADD COLUMN IF NOT EXISTS session_expires_at TIMESTAMPTZ",
+            "ALTER TABLE source_connections ADD COLUMN IF NOT EXISTS client_id VARCHAR(255)",
+            "ALTER TABLE source_connections ADD COLUMN IF NOT EXISTS encrypted_credentials TEXT",
+            "ALTER TABLE source_connections ADD COLUMN IF NOT EXISTS encrypted_access_token TEXT",
+            "ALTER TABLE source_connections ADD COLUMN IF NOT EXISTS token_expires_at TIMESTAMPTZ",
         ]:
             try:
                 await conn.execute(__import__("sqlalchemy").text(stmt))

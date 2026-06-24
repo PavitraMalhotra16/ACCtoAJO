@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import AccTemplateRaw, AccTemplateParsed, SourceConnection, get_db
-from core.security import get_login_from_cookie
+from core.security import get_login_from_cookie, get_valid_acc_token
 from services.template_extractor import (
     count_templates,
     fetch_delivery_detail,
@@ -30,7 +30,7 @@ log = logging.getLogger("acc_backend.templates")
 router = APIRouter()
 
 
-async def _require_acc(db: AsyncSession, login_id: str | None) -> SourceConnection:
+async def _require_acc(db: AsyncSession, login_id: str | None) -> tuple[SourceConnection, str]:
     if not login_id:
         raise HTTPException(401, "Not authenticated — connect to ACC first")
     result = await db.execute(
@@ -39,7 +39,11 @@ async def _require_acc(db: AsyncSession, login_id: str | None) -> SourceConnecti
     conn = result.scalar_one_or_none()
     if not conn or not conn.authenticated:
         raise HTTPException(401, "ACC not authenticated — connect first")
-    return conn
+    try:
+        token = await get_valid_acc_token(conn, db)
+    except RuntimeError as e:
+        raise HTTPException(401, str(e))
+    return conn, token
 
 
 def _soap_url(instance_url: str) -> str:
@@ -69,9 +73,9 @@ async def get_template_count(
     db: AsyncSession = Depends(get_db),
 ):
     login_id = await get_login_from_cookie(acc_session, db, acc_user)
-    conn = await _require_acc(db, login_id)
+    conn, token = await _require_acc(db, login_id)
     total = await count_templates(
-        _soap_url(conn.instance_url), conn.session_token, conn.security_token
+        _soap_url(conn.instance_url), token, conn.security_token or ""
     )
     stored_result = await db.execute(
         select(func.count()).select_from(AccTemplateParsed)
@@ -89,18 +93,18 @@ async def extract_templates(
     db: AsyncSession = Depends(get_db),
 ):
     login_id = await get_login_from_cookie(acc_session, db, acc_user)
-    conn = await _require_acc(db, login_id)
+    conn, token = await _require_acc(db, login_id)
     soap_url = _soap_url(conn.instance_url)
 
-    # Use stored count as cursor — next batch starts where the last one ended
+    # Use raw count as cursor — next batch starts after all templates already fetched from ACC
     stored_result = await db.execute(
-        select(func.count()).select_from(AccTemplateParsed)
-        .where(AccTemplateParsed.login_id == login_id)
+        select(func.count()).select_from(AccTemplateRaw)
+        .where(AccTemplateRaw.login_id == login_id)
     )
     start_line = stored_result.scalar_one()
 
     templates = await fetch_template_list(
-        soap_url, conn.session_token, conn.security_token, start_line=start_line
+        soap_url, token, conn.security_token or "", start_line=start_line
     )
     log.info("ACC template list returned %d template(s) (start_line=%d)", len(templates), start_line)
     if not templates:
@@ -114,32 +118,59 @@ async def extract_templates(
     log.info("Processing batch (batch_id=%s): %d template(s) starting at offset %d",
              batch_id, len(templates), start_line)
 
+    # Pre-load source_ids already in raw and parsed — one query each, used for all templates.
+    raw_ids_result = await db.execute(
+        select(AccTemplateRaw.source_id).where(AccTemplateRaw.login_id == login_id)
+    )
+    already_in_raw: set[str] = {r[0] for r in raw_ids_result.all()}
+
+    parsed_ids_result = await db.execute(
+        select(AccTemplateParsed.source_id).where(AccTemplateParsed.login_id == login_id)
+    )
+    already_in_parsed: set[str] = {r[0] for r in parsed_ids_result.all()}
+
     for meta in templates:
+        tid = meta["id"]
         try:
-            existing = await db.execute(
-                select(AccTemplateParsed).where(
-                    AccTemplateParsed.login_id == login_id,
-                    AccTemplateParsed.source_id == meta["id"],
+            detail = None
+
+            # Step 1: store raw only if not already extracted
+            if tid not in already_in_raw:
+                detail = await fetch_delivery_detail(
+                    soap_url, token, conn.security_token or "", tid
                 )
-            )
-            if existing.scalars().first() is not None:
+                if not detail:
+                    detail = meta
+                await store_raw(db, login_id, detail, batch_id)
+                already_in_raw.add(tid)
+
+            # Step 2: store parsed only if not already parsed
+            if tid not in already_in_parsed:
+                if detail is None:
+                    # Raw exists in DB but parsed doesn't — reload from stored raw XML
+                    raw_row_result = await db.execute(
+                        select(AccTemplateRaw).where(
+                            AccTemplateRaw.login_id == login_id,
+                            AccTemplateRaw.source_id == tid,
+                        )
+                    )
+                    raw_row = raw_row_result.scalars().first()
+                    if raw_row and raw_row.raw_xml:
+                        from services.acc_soap import parse_delivery_detail
+                        detail = parse_delivery_detail(raw_row.raw_xml)
+                    else:
+                        detail = meta
+                await store_parsed(db, login_id, detail, batch_id)
+                already_in_parsed.add(tid)
+                await db.commit()
+                extracted += 1
+            else:
                 skipped += 1
-                continue
 
-            detail = await fetch_delivery_detail(
-                soap_url, conn.session_token, conn.security_token, meta["id"]
-            )
-            if not detail:
-                detail = meta
-
-            await store_raw(db, login_id, detail, batch_id)
-            await store_parsed(db, login_id, detail, batch_id)
-            await db.commit()
-            extracted += 1
         except Exception as exc:
             await db.rollback()
-            log.warning("Failed to extract template id=%s: %s", meta.get("id"), exc)
-            errors.append({"id": meta.get("id"), "error": str(exc)})
+            log.warning("Failed to process template id=%s: %s", tid, exc)
+            errors.append({"id": tid, "error": str(exc)})
 
     return {"extracted": extracted, "total_found": len(templates), "skipped": skipped,
             "batch_id": batch_id, "errors": errors}

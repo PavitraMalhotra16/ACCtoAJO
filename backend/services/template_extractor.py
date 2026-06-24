@@ -104,18 +104,22 @@ async def store_parsed(db: AsyncSession, login_id: str, detail: dict, batch_id: 
         )
     )
     row = existing.scalars().first()
-    template_data = json.dumps({
+    channel = detail.get("channel", "email")
+    base = {
         "sourceId": detail["id"],
         "internalName": detail.get("internalName"),
         "label": detail.get("label"),
         "description": detail.get("description"),
-        "channel": detail.get("channel"),
+        "channel": channel,
         "lastModified": detail.get("lastModified"),
-        "subject": detail.get("subjectRaw"),
-        "htmlBody": detail.get("htmlRaw"),
-        "textBody": detail.get("textRaw"),
-        "smsContent": detail.get("smsRaw"),
-    }, ensure_ascii=False)
+    }
+    if channel == "sms":
+        base["smsContent"] = detail.get("smsRaw")
+    else:
+        base["subject"] = detail.get("subjectRaw")
+        base["htmlBody"] = detail.get("htmlRaw")
+        base["textBody"] = detail.get("textRaw")
+    template_data = json.dumps(base, ensure_ascii=False)
     if row is None:
         row = AccTemplateParsed(
             id=str(uuid.uuid4()),
