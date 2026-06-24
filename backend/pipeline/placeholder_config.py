@@ -12,17 +12,8 @@ RECIPIENT_MAPPINGS: dict[str, str] = {
 
 def get_ajo_mapping(acc_field: str) -> str | None:
     """
-    Map an ACC placeholder field name to its AJO equivalent.
-
-    recipient.x  → RECIPIENT_MAPPINGS lookup, else profile.x
-    targetData.x → context.targetData.x
-    anything else → None (caller decides how to handle)
+    Return the configured AJO path for an ACC field, or None if not in config.
+    Callers that get None should use the raw field name as-is (bracket-only conversion)
+    so the user sees it clearly and can edit it in the analysis UI.
     """
-    if acc_field in RECIPIENT_MAPPINGS:
-        return RECIPIENT_MAPPINGS[acc_field]
-    if acc_field.startswith("recipient."):
-        suffix = acc_field[len("recipient."):]
-        return f"profile.{suffix}"
-    if acc_field.startswith("targetData."):
-        return f"context.{acc_field}"
-    return None
+    return RECIPIENT_MAPPINGS.get(acc_field)

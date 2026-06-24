@@ -319,11 +319,13 @@ async def template_analysis(
         for m in re_recipient.finditer(text):
             field = m.group(1)
             if field not in unique_recipient:
-                unique_recipient[field] = get_ajo_mapping(field) or f"profile.{field.split('.', 1)[-1]}"
+                # Use config mapping if known; otherwise show raw field for user to edit
+                unique_recipient[field] = get_ajo_mapping(field) or field
         for m in re_target.finditer(text):
             field = m.group(1)
             if field not in unique_target:
-                unique_target[field] = f"context.{field}"
+                # No config for targetData — show raw field, user decides the AJO path
+                unique_target[field] = field
 
     return {
         "recipient": [
