@@ -45,13 +45,6 @@ async def _run_conversion_job(job_id: str, schemas: list[SchemaRef], acc_conn, l
     job = _jobs[job_id]
     job["status"] = "running"
     soap_url = acc_conn.instance_url.rstrip("/") + "/nl/jsp/soaprouter.jsp"
-    security_token = acc_conn.security_token or ""
-    headers = {
-        "Content-Type": "text/xml; charset=utf-8",
-        "SOAPAction": "xtk:queryDef#ExecuteQuery",
-        "Cookie": f"__sessiontoken={token}",
-        "X-Security-Token": security_token,
-    }
 
     async with httpx.AsyncClient(timeout=SOAP_TIMEOUT) as soap:
         for s in schemas:
@@ -66,6 +59,23 @@ async def _run_conversion_job(job_id: str, schemas: list[SchemaRef], acc_conn, l
             job["steps"].append(step)
 
             try:
+                # Refresh token per-schema so a long job never hits an expired token mid-run
+                async with AsyncSessionLocal() as db_refresh:
+                    result = await db_refresh.execute(
+                        select(SourceConnection).where(SourceConnection.login_id == login_id)
+                    )
+                    conn = result.scalar_one_or_none()
+                    if conn:
+                        token = await get_valid_acc_token(conn, db_refresh)
+
+                security_token = acc_conn.security_token or ""
+                headers = {
+                    "Content-Type": "text/xml; charset=utf-8",
+                    "SOAPAction": "xtk:queryDef#ExecuteQuery",
+                    "Cookie": f"__sessiontoken={token}",
+                    "X-Security-Token": security_token,
+                }
+
                 # Fetch raw XML via xtk:srcSchema
                 resp = await soap.post(
                     soap_url,
@@ -168,20 +178,26 @@ async def convert_start_all(
 
     r = await db.execute(select(SourceConnection).where(SourceConnection.login_id == login_id))
     acc = r.scalar_one_or_none()
-    if not acc or not acc.session_token:
+    if not acc or not acc.authenticated:
         raise HTTPException(401, "ACC session not found")
+
+    try:
+        token = await get_valid_acc_token(acc, db)
+    except RuntimeError as e:
+        raise HTTPException(401, str(e))
 
     # Fetch all schemas from ACC
     soap_url = acc.instance_url.rstrip("/") + "/nl/jsp/soaprouter.jsp"
+    security_token = acc.security_token or ""
     async with httpx.AsyncClient(timeout=SOAP_TIMEOUT) as client:
         resp = await client.post(
             soap_url,
-            content=build_schema_inventory_envelope(acc.session_token, acc.security_token),
+            content=build_schema_inventory_envelope(token, security_token),
             headers={
                 "Content-Type": "text/xml; charset=utf-8",
                 "SOAPAction": "xtk:queryDef#ExecuteQuery",
-                "Cookie": f"__sessiontoken={acc.session_token}",
-                "X-Security-Token": acc.security_token,
+                "Cookie": f"__sessiontoken={token}",
+                "X-Security-Token": security_token,
             },
         )
     fault = parse_fault(resp.text)
@@ -226,7 +242,7 @@ async def convert_start_all(
         "failed_count":   0,
     }
 
-    asyncio.create_task(_run_conversion_job(job_id, schemas_to_convert, acc, login_id))
+    asyncio.create_task(_run_conversion_job(job_id, schemas_to_convert, acc, login_id, token))
     return {"job_id": job_id, "message": "started", "total": len(schemas), "skipped": len(schemas) - len(schemas_to_convert)}
 
 
