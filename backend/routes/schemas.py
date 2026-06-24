@@ -11,9 +11,7 @@ from fastapi import APIRouter, Cookie, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import json
-
-from db import ConvertedSchema, SourceConnection, get_db
+from db import SourceConnection, get_db
 from core.security import get_login_from_cookie, get_valid_acc_token
 from services.acc_soap import build_list_schemas_envelope, build_srcschema_get_envelope, parse_schemas, parse_fault
 from services.schema_preview import parse_schema_preview
@@ -137,26 +135,6 @@ async def _fetch_links(
         return f"{namespace}:{name}", []
 
 
-def _build_graph_from_rows(rows: list, all_names: set) -> tuple[dict, set]:
-    """Build dependency graph from already-extracted converted_schemas rows."""
-    dependents_of: dict[str, list[str]] = {}
-    dependent_set: set[str] = set()
-    for row in rows:
-        try:
-            raw = json.loads(row.raw_json)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        for link in raw.get("linksAndJoins", []):
-            target = link.get("targetSchema", "")
-            if not target or target == row.schema_name or target not in all_names:
-                continue
-            dependents_of.setdefault(target, [])
-            if row.schema_name not in dependents_of[target]:
-                dependents_of[target].append(row.schema_name)
-            dependent_set.add(row.schema_name)
-    return dependents_of, dependent_set
-
-
 @router.get("/api/schemas/dependencies")
 async def get_dependency_graph(
     acc_session: Optional[str] = Cookie(default=None),
@@ -164,13 +142,12 @@ async def get_dependency_graph(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Build the schema dependency graph.
+    Build the schema dependency graph by fetching all custom schema XMLs live
+    from ACC SOAP concurrently.
 
-    Strategy (hybrid):
-      1. If converted_schemas rows exist for this user → build graph from raw_json
-         (linksAndJoins already parsed during extraction — instant, no SOAP calls).
-      2. If no rows yet (user hasn't extracted) → fall back to live SOAP calls,
-         fetching each custom schema's srcSchema XML concurrently.
+    Always uses live SOAP — the DB path was removed because it only covers
+    extracted schemas, missing dependencies for schemas the user never selected
+    for extraction.
 
     A schema is DEPENDENT if it has a link (FK) pointing to another custom schema.
     A schema is INDEPENDENT if nothing links away from it to another custom schema.
@@ -179,19 +156,6 @@ async def get_dependency_graph(
     if not login_id:
         raise HTTPException(401, "Not authenticated")
 
-    # ── Path A: use already-extracted data from DB (fast) ──────────────────────
-    result = await db.execute(
-        select(ConvertedSchema).where(ConvertedSchema.login_id == login_id)
-    )
-    rows = result.scalars().all()
-
-    if rows:
-        all_names = {r.schema_name for r in rows}
-        dependents_of, dependent_set = _build_graph_from_rows(rows, all_names)
-        log.debug("Dependency graph built from DB (%d schemas)", len(rows))
-        return {"dependents_of": dependents_of, "dependent_set": list(dependent_set)}
-
-    # ── Path B: no extraction yet — fetch live from ACC SOAP ───────────────────
     conn_result = await db.execute(
         select(SourceConnection).where(SourceConnection.login_id == login_id)
     )
