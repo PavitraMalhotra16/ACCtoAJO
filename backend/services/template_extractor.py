@@ -27,12 +27,13 @@ log = logging.getLogger("acc_backend.template_extractor")
 _HEADERS = {"Content-Type": "text/xml; charset=utf-8", "SOAPAction": "xtk:queryDef#ExecuteQuery"}
 
 
-async def count_templates(soap_url: str, session_token: str, security_token: str) -> int:
+async def count_templates(soap_url: str, session_token: str, security_token: str, auth_headers: dict | None = None) -> int:
+    headers = {**_HEADERS, **(auth_headers or {})}
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
             soap_url,
             content=build_count_templates_envelope(session_token, security_token),
-            headers=_HEADERS,
+            headers=headers,
         )
     if resp.status_code != 200:
         raise RuntimeError(parse_fault(resp.text) or f"HTTP {resp.status_code} from ACC count")
@@ -40,15 +41,16 @@ async def count_templates(soap_url: str, session_token: str, security_token: str
 
 
 async def fetch_template_list(
-    soap_url: str, session_token: str, security_token: str, start_line: int = 0
+    soap_url: str, session_token: str, security_token: str, start_line: int = 0, auth_headers: dict | None = None
 ) -> list[dict]:
     """Fetch exactly one page of templates from ACC starting at start_line."""
     page_size = settings.template_page_size
+    headers = {**_HEADERS, **(auth_headers or {})}
     async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.post(
             soap_url,
             content=build_list_templates_envelope(session_token, security_token, page_size, start_line),
-            headers=_HEADERS,
+            headers=headers,
         )
     if resp.status_code != 200:
         raise RuntimeError(parse_fault(resp.text) or f"HTTP {resp.status_code} fetching template list")
@@ -56,13 +58,14 @@ async def fetch_template_list(
 
 
 async def fetch_delivery_detail(
-    soap_url: str, session_token: str, security_token: str, delivery_id: str
+    soap_url: str, session_token: str, security_token: str, delivery_id: str, auth_headers: dict | None = None
 ) -> dict:
+    headers = {**_HEADERS, **(auth_headers or {})}
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
             soap_url,
             content=build_get_delivery_envelope(session_token, security_token, delivery_id),
-            headers=_HEADERS,
+            headers=headers,
         )
     if resp.status_code != 200:
         raise RuntimeError(parse_fault(resp.text) or f"HTTP {resp.status_code} fetching delivery id={delivery_id}")

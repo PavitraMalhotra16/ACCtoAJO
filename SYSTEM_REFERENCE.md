@@ -192,13 +192,14 @@ ENCRYPTION_KEY=<generate with: python -c "from cryptography.fernet import Fernet
 
 ### ACC Technical Auth (IMS OAuth)
 1. Browser `POST /api/acc/connect` with `auth_type: "technical"`, `client_id`, `client_secret`, `scope`, `instance_url`
-2. Backend calls Adobe IMS `POST /ims/token/v3` → gets `access_token` + `expires_in`
-3. Backend calls ACC SOAP `xtk:session#BearerTokenLogon` with the IMS token → gets `session_token` + `security_token`
-4. Saves to `source_connections`: `session_token`, `security_token`, `encrypted_access_token`, `encrypted_credentials`, `token_expires_at = now + expires_in`
-5. Creates `user_sessions` row (7-day rolling TTL)
-6. Sets `acc_session` cookie (httponly, 7 days)
+2. Backend calls Adobe IMS `POST /ims/token/v3` → gets `access_token` + `expires_in` (value is in **seconds** — do not divide by 1000)
+3. Saves to `source_connections`: `encrypted_access_token`, `encrypted_credentials`, `token_expires_at = now + expires_in` (no `session_token` or `security_token` — those are only used for classic auth)
+4. Creates `user_sessions` row (7-day rolling TTL)
+5. Sets `acc_session` cookie (httponly, 7 days)
 
-**Auto-refresh:** Every subsequent API call goes through `get_valid_acc_token()`. If `token_expires_at <= now + 60s`, it silently re-calls IMS using stored `encrypted_credentials`, then calls `BearerTokenLogon` again to get fresh SOAP tokens, updates `session_token`, `security_token`, `encrypted_access_token`, and `token_expires_at` in DB — completely transparent to the route.
+> **Modern bearer flow:** This tool uses Adobe's recommended server-to-server technical-account pattern. All SOAP calls for technical auth send `Authorization: Bearer <access_token>` in the HTTP header with an empty `sessiontoken` in the SOAP envelope. The helper `acc_soap_headers(conn, token)` returns the correct headers per auth type — routes never branch on `auth_type`.
+
+**Auto-refresh:** Every subsequent API call goes through `get_valid_acc_token()`. If `token_expires_at <= now + 60s`, it silently re-calls IMS `/ims/token/v3` using stored `encrypted_credentials`, updates `encrypted_access_token` and `token_expires_at` in DB — completely transparent to the route.
 
 ### AJO Auth
 1. Browser `POST /api/ajo/connect` with `org_id`, `client_id`, `client_secret`, `sandbox_name`
@@ -647,44 +648,43 @@ Body: { auth_type: "technical", instance_url, client_id, client_secret, scope }
   STEP 1 → Adobe IMS
     POST https://ims-na1.adobelogin.com/ims/token/v3
     Body: grant_type=client_credentials, client_id, client_secret, scope
-    Response: { access_token, expires_in }
-    (if expires_in > 86400 → divide by 1000, IMS sometimes returns ms)
+    Response: { access_token, token_type: "bearer", expires_in }
 
-  STEP 2 → ACC SOAP BearerTokenLogon
-    POST {instance_url}/nl/jsp/soaprouter.jsp
-    SOAPAction: xtk:session#BearerTokenLogon
-    Body: SOAP envelope with IMS access_token
-    Response: session_token + security_token
-    → Exchanges IMS Bearer token for proper ACC SOAP session tokens
-    → All subsequent SOAP calls work identically to classic auth
+    NOTE: expires_in is in SECONDS (e.g. 86399). Do NOT divide by 1000.
+    The ms-division confusion applies to older IMS endpoints, not /ims/token/v3.
 
-  STEP 3 → Save to source_connections
+  STEP 2 → Save to source_connections  (modern direct bearer — no BearerTokenLogon)
     login_id               = client_id
     auth_type              = "technical"
     client_id              = client_id
-    session_token          = SOAP token from BearerTokenLogon
-    security_token         = SOAP security token from BearerTokenLogon
     encrypted_credentials  = Fernet("client_id:client_secret")
     encrypted_access_token = Fernet(access_token)
-    token_expires_at       = now + expires_in
+    token_expires_at       = now + expires_in   ← expires_in already in seconds
 
-  STEP 4 → Create user_sessions row + set acc_session cookie (7-day rolling)
+    NOTE: session_token and security_token are NOT stored for technical auth.
+    Every SOAP call passes Authorization: Bearer <access_token> in the HTTP
+    header and an empty sessiontoken in the SOAP envelope (via acc_soap_headers).
+
+  STEP 3 → Create user_sessions row + set acc_session cookie (7-day rolling)
 ```
 
 **Auto-refresh** — `get_valid_acc_token()` called before every SOAP call:
 ```
 If token_expires_at > now + 60s:
-    return conn.session_token   ← SOAP session still valid, use it
+    return decrypt(encrypted_access_token)   ← IMS token still valid
 
 Else:
     client_id, client_secret = decrypt(encrypted_credentials).split(":")
     POST IMS /ims/token/v3 → new access_token + expires_in
-    POST ACC /soaprouter.jsp  BearerTokenLogon (new IMS token)
-    → new session_token + security_token
-    UPDATE source_connections SET session_token, security_token,
-                                  encrypted_access_token, token_expires_at
-    return new session_token
+    UPDATE source_connections SET encrypted_access_token, token_expires_at
+    return new access_token
 ```
+
+Routes then call `acc_soap_headers(conn, token)` which returns:
+- Technical: `{ "Authorization": "Bearer <token>" }`
+- Classic:   `{ "Cookie": "__sessiontoken=<token>", "X-Security-Token": "<security_token>" }`
+
+No auth-type branching needed in routes or SOAP envelope builders.
 
 ### AJO Auth
 
@@ -751,9 +751,13 @@ Returns `(conn, token)`:
 - `token` → valid SOAP session token, same shape for both auth types
 
 Classic: `token = conn.session_token` (re-Logon'd if `session_expires_at` passed)
-Technical: `token = conn.session_token` (from BearerTokenLogon; IMS-refreshed + re-BearerLogon'd if `token_expires_at` passed)
+Technical: `token = decrypt(conn.encrypted_access_token)` (IMS-refreshed if `token_expires_at` passed)
 
-In both cases, routes and SOAP envelope builders are identical — no auth-type branching needed anywhere downstream.
+Routes then call `acc_soap_headers(conn, token)` to get the correct HTTP headers:
+- Technical returns `Authorization: Bearer <token>` + empty SOAP sessiontoken
+- Classic returns `Cookie: __sessiontoken=<token>` + `X-Security-Token`
+
+No auth-type branching needed in SOAP envelope builders.
 
 ---
 
@@ -784,33 +788,15 @@ This means:
 
 **Called from:** `frontend_app/src/api/client.ts` → `getSchemaDependencies()` → called on page load in `MigrationSelectPage.tsx`
 
-**Hybrid strategy — DB first, SOAP fallback:**
+**Always uses live ACC SOAP** — the DB was considered but rejected because users only extract a subset of schemas. A DB-only approach would miss dependencies for schemas that were never extracted, silently showing dependent schemas as selectable.
 
 ```
 STEP 1 — Authenticate
-  get_login_from_cookie(acc_session, db, acc_user)
-  → resolves acc_session cookie → login_id
-
-STEP 2 — Check if schemas have already been extracted (DB path)
-  SELECT source_id FROM converted_schemas WHERE login_id = ?
-
-  If rows exist (user has run extraction at least once):
-    → PATH A: build graph from DB (fast, no SOAP)
-    → all_names = { row.schema_name for row in rows }
-    → For each row, load raw_json → read linksAndJoins array
-      For each link where targetSchema is in all_names:
-        dependents_of[targetSchema].append(row.schema_name)
-        dependent_set.add(row.schema_name)
-    → Return immediately — no SOAP calls made
-
-  If no rows (user hasn't extracted yet):
-    → PATH B: fetch live from ACC SOAP (see below)
-
-STEP 3 (PATH B only) — Authenticate for SOAP
+  get_login_from_cookie(acc_session, db, acc_user) → login_id
   SELECT source_connections WHERE login_id = ?
   get_valid_acc_token(conn, db) → valid SOAP session token
 
-STEP 4 (PATH B only) — Fetch list of all custom schemas
+STEP 2 — Fetch list of all custom schemas
   POST {instance_url}/nl/jsp/soaprouter.jsp
   SOAPAction: xtk:queryDef#ExecuteQuery
   Envelope: build_list_schemas_envelope(token, security_token)
@@ -819,7 +805,7 @@ STEP 4 (PATH B only) — Fetch list of all custom schemas
   offer, mkt, wpa, sup, temp, ghost, nav, acs, fda
   → Only custom schemas (e.g. hdbk:*, cus:*) remain
 
-STEP 5 (PATH B only) — Fetch srcSchema XML for every custom schema (CONCURRENT)
+STEP 3 — Fetch srcSchema XML for every custom schema (CONCURRENT)
   asyncio.gather(*[_fetch_links(client, soap_url, token, ns, name) for each schema])
 
   For each schema, _fetch_links() does:
@@ -829,22 +815,20 @@ STEP 5 (PATH B only) — Fetch srcSchema XML for every custom schema (CONCURRENT
 
   All N schemas fetched in parallel — one HTTP connection pool, N concurrent requests
 
-STEP 6 (PATH B only) — Build dependency graph
+STEP 4 — Build dependency graph
   For each (schema_key, links) from results:
-    For each link where targetSchema is in the custom schema set:
+    For each link where targetSchema is a custom namespace (not xtk/nms/etc.):
       dependents_of[targetSchema].append(schema_key)
       dependent_set.add(schema_key)
 
-STEP 7 — Return
+STEP 5 — Return
   {
-    "dependents_of": { "hdbk:accountProfile": ["hdbk:membership", "hdbk:order"] },
-    "dependent_set": ["hdbk:membership", "hdbk:order"]
+    "dependents_of": { "hdbk:accountProfile": ["hdbk:membership"], "hdbk:campaign": ["hdbk:response"] },
+    "dependent_set": ["hdbk:membership", "hdbk:response"]
   }
 ```
 
-**Path A (post-extraction):** reads `linksAndJoins` already parsed during schema extraction — no SOAP calls, instant response.
-
-**Path B (pre-extraction):** fetches all custom schema XMLs live from ACC concurrently — always accurate, used only before the user has run any extraction.
+**Not stored in the database.** Computed fresh on every page load from live ACC SOAP — guarantees all schema relationships are detected regardless of which schemas have been previously extracted.
 
 ---
 
@@ -873,7 +857,7 @@ STEP 7 — Return
 | `dependents_of` | `Record<string, string[]>` | For each independent schema, list of schemas that FK-link to it |
 | `dependent_set` | `string[]` | All schema keys that have at least one outgoing FK to another custom schema |
 
-**Storage:** PATH A reads from `converted_schemas` (no SOAP). PATH B computes live and is not persisted — computed fresh on every pre-extraction page load.
+**Not stored in the database.** Computed fresh on every request from live ACC SOAP — always reflects all schemas regardless of extraction history.
 
 ---
 

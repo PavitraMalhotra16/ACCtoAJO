@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db import DestinationConnection, SourceConnection, UserSession, get_db
 from core.security import SESSION_TTL_DAYS as _SESSION_TTL_DAYS, encrypt, get_login_from_cookie
 from services.acc_soap import (
-    build_bearer_token_logon_envelope,
     build_logon_envelope,
     build_test_cnx_envelope,
     parse_fault,
@@ -82,8 +81,6 @@ async def ajo_connect(
         raise HTTPException(401, "IMS did not return an access token")
 
     expires_in = int(payload.get("expires_in", 3600))
-    if expires_in > 86_400:
-        expires_in //= 1000
     now = datetime.now(timezone.utc)
     token_expires_at = now + timedelta(seconds=expires_in)
 
@@ -272,32 +269,8 @@ async def acc_connect(
             raise HTTPException(401, "IMS did not return an access token")
 
         expires_in = int(payload.get("expires_in", 3600))
-        if expires_in > 86_400:
-            expires_in //= 1000   # IMS sometimes returns milliseconds
         now = datetime.now(timezone.utc)
         token_expires_at = now + timedelta(seconds=expires_in)
-
-        # Exchange IMS Bearer token for ACC SOAP session/security tokens
-        # so all subsequent SOAP calls work identically to classic auth.
-        soap_url = body.instance_url.rstrip("/") + "/nl/jsp/soaprouter.jsp"
-        async with httpx.AsyncClient(timeout=30.0) as soap_client:
-            try:
-                bearer_resp = await soap_client.post(
-                    soap_url,
-                    content=build_bearer_token_logon_envelope(access_token),
-                    headers={
-                        "Content-Type": "text/xml; charset=utf-8",
-                        "SOAPAction": "xtk:session#BearerTokenLogon",
-                    },
-                )
-            except httpx.RequestError:
-                raise HTTPException(502, "Cannot reach Adobe Campaign Classic")
-        fault = parse_fault(bearer_resp.text)
-        if bearer_resp.status_code != 200 or fault:
-            raise HTTPException(401, fault or "BearerTokenLogon failed — check instance URL and IMS scopes")
-        session_token, security_token = parse_logon_response(bearer_resp.text)
-        if not session_token:
-            raise HTTPException(401, "BearerTokenLogon did not return a session token")
 
         login_id = body.client_id
         result = await db.execute(select(SourceConnection).where(SourceConnection.login_id == login_id))
@@ -309,8 +282,6 @@ async def acc_connect(
             conn.encrypted_credentials = encrypt(f"{body.client_id}:{body.client_secret}")
             conn.encrypted_access_token = encrypt(access_token)
             conn.token_expires_at = token_expires_at
-            conn.session_token = session_token
-            conn.security_token = security_token
             conn.authenticated = True
             conn.last_authenticated_at = now
         else:
@@ -322,8 +293,6 @@ async def acc_connect(
                 encrypted_credentials=encrypt(f"{body.client_id}:{body.client_secret}"),
                 encrypted_access_token=encrypt(access_token),
                 token_expires_at=token_expires_at,
-                session_token=session_token,
-                security_token=security_token,
                 authenticated=True,
                 last_authenticated_at=now,
             )
