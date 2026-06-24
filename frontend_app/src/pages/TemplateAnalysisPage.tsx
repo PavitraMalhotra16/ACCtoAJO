@@ -24,7 +24,11 @@ export default function TemplateAnalysisPage() {
 
   useEffect(() => {
     fetch('/api/templates/analysis', { credentials: 'include' })
-      .then(r => r.json())
+      .then(async r => {
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || `Error ${r.status}`);
+        return d as AnalysisData;
+      })
       .then((d: AnalysisData) => {
         setData(d);
         // Initialize mappings from defaults

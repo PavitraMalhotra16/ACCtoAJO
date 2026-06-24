@@ -155,53 +155,6 @@ async def extract_templates(
             "batch_id": batch_id, "errors": errors}
 
 
-@router.get("/api/templates")
-async def list_templates(
-    acc_session: str | None = Cookie(default=None),
-    acc_user: str | None = Cookie(default=None),
-    db: AsyncSession = Depends(get_db),
-):
-    login_id = await get_login_from_cookie(acc_session, db, acc_user)
-    if not login_id:
-        raise HTTPException(401, "Not authenticated")
-    result = await db.execute(
-        select(AccTemplateNormalized)
-        .where(AccTemplateNormalized.login_id == login_id)
-        .order_by(AccTemplateNormalized.created_at.desc())
-    )
-    rows = result.scalars().all()
-    return [
-        {
-            "id": r.id,
-            "payloadFields": json.loads(r.payload_fields_json) if r.payload_fields_json else None,
-        }
-        for r in rows
-    ]
-
-
-@router.get("/api/templates/{template_id}")
-async def get_template(
-    template_id: str,
-    acc_session: str | None = Cookie(default=None),
-    acc_user: str | None = Cookie(default=None),
-    db: AsyncSession = Depends(get_db),
-):
-    login_id = await get_login_from_cookie(acc_session, db, acc_user)
-    if not login_id:
-        raise HTTPException(401, "Not authenticated")
-    result = await db.execute(
-        select(AccTemplateNormalized).where(
-            AccTemplateNormalized.id == template_id,
-            AccTemplateNormalized.login_id == login_id,
-        )
-    )
-    row = result.scalar_one_or_none()
-    if not row:
-        raise HTTPException(404, "Template not found")
-    return {
-        "id": row.id,
-        "payloadFields": json.loads(row.payload_fields_json) if row.payload_fields_json else None,
-    }
 
 
 # ── Template migration routes ─────────────────────────────────────────────────
