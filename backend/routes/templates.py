@@ -21,6 +21,8 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from db import AccTemplateRaw, AccTemplateParsed, SourceConnection, get_db
+from core.security import get_login_from_cookie, get_valid_acc_token, acc_soap_headers
 from db import (
     AccTemplateRaw, AccTemplateParsed, AsyncSessionLocal, SourceConnection, get_db,
     DestinationConnection, TemplateFolderConfig,
@@ -106,8 +108,10 @@ async def get_template_count(
 ):
     login_id = await get_login_from_cookie(acc_session, db, acc_user)
     conn, token = await _require_acc(db, login_id)
+    soap_token = "" if conn.auth_type == "technical" else token
+    auth_hdrs = acc_soap_headers(conn, token)
     total = await count_templates(
-        _soap_url(conn.instance_url), token, conn.security_token or ""
+        _soap_url(conn.instance_url), soap_token, conn.security_token or "", auth_headers=auth_hdrs
     )
     stored = await _count_valid_stored(db, login_id)
     to_migrate = max(0, total - stored)
@@ -123,13 +127,15 @@ async def extract_templates(
     login_id = await get_login_from_cookie(acc_session, db, acc_user)
     conn, token = await _require_acc(db, login_id)
     soap_url = _soap_url(conn.instance_url)
+    soap_token = "" if conn.auth_type == "technical" else token
+    auth_hdrs = acc_soap_headers(conn, token)
 
     # Cursor = total rows in DB (including excluded) so the SOAP offset stays aligned
     # with ACC's fixed ordering even when some rows were previously skipped/excluded
     start_line = await _soap_offset(db, login_id)
 
     templates = await fetch_template_list(
-        soap_url, token, conn.security_token or "", start_line=start_line
+        soap_url, soap_token, conn.security_token or "", start_line=start_line, auth_headers=auth_hdrs
     )
     log.info("ACC template list returned %d template(s) (start_line=%d)", len(templates), start_line)
     if not templates:
@@ -149,10 +155,10 @@ async def extract_templates(
                 skipped += 1
                 continue
 
-            existing = await db.execute(
-                select(AccTemplateParsed).where(
-                    AccTemplateParsed.login_id == login_id,
-                    AccTemplateParsed.source_id == meta["id"],
+            # Step 1: store raw only if not already extracted
+            if tid not in already_in_raw:
+                detail = await fetch_delivery_detail(
+                    soap_url, soap_token, conn.security_token or "", tid, auth_headers=auth_hdrs
                 )
             )
             if existing.scalars().first() is not None:
