@@ -64,9 +64,18 @@ def _soap_url(instance_url: str) -> str:
     return instance_url.rstrip("/") + "/nl/jsp/soaprouter.jsp"
 
 
+async def _soap_offset(db: AsyncSession, login_id: str) -> int:
+    """Total rows in DB for this user — used as SOAP start_line so we skip already-fetched templates."""
+    result = await db.execute(
+        select(func.count()).select_from(AccTemplateParsed)
+        .where(AccTemplateParsed.login_id == login_id)
+    )
+    return result.scalar() or 0
+
+
 async def _count_valid_stored(db: AsyncSession, login_id: str) -> int:
     """Count stored templates excluding any that carry an excluded internalName.
-    Used as the SOAP pagination cursor so excluded rows don't skew the offset."""
+    Used for display and to_migrate calculation — does not include excluded rows."""
     result = await db.execute(
         select(AccTemplateParsed.template_data)
         .where(AccTemplateParsed.login_id == login_id)
@@ -115,9 +124,9 @@ async def extract_templates(
     conn, token = await _require_acc(db, login_id)
     soap_url = _soap_url(conn.instance_url)
 
-    # Cursor = count of valid (non-excluded) stored templates so the SOAP offset stays correct
-    # even if excluded rows exist in the DB from a previous extraction run
-    start_line = await _count_valid_stored(db, login_id)
+    # Cursor = total rows in DB (including excluded) so the SOAP offset stays aligned
+    # with ACC's fixed ordering even when some rows were previously skipped/excluded
+    start_line = await _soap_offset(db, login_id)
 
     templates = await fetch_template_list(
         soap_url, token, conn.security_token or "", start_line=start_line

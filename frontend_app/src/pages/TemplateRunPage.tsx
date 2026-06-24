@@ -50,11 +50,33 @@ export default function TemplateRunPage() {
   const [error, setError] = useState<string | null>(null);
   const [showFailures, setShowFailures] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const notifiedRef = useRef(false);
 
   function stopPolling() {
     if (pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
+    }
+  }
+
+  function fireNotification(failed: number) {
+    if (notifiedRef.current) return;
+    notifiedRef.current = true;
+    localStorage.removeItem('lastTemplateRunId');
+
+    const send = () => {
+      const msg = failed > 0
+        ? `Migration complete — ${failed} template(s) failed. Check the results.`
+        : 'Template migration complete! All templates migrated successfully.';
+      new Notification('ACC → AJO Migration', { body: msg, icon: '/favicon.ico' });
+    };
+
+    if ('Notification' in window) {
+      if (Notification.permission === 'granted') {
+        send();
+      } else if (Notification.permission !== 'denied') {
+        Notification.requestPermission().then(p => { if (p === 'granted') send(); });
+      }
     }
   }
 
@@ -69,6 +91,7 @@ export default function TemplateRunPage() {
       setStatus(data);
       if (data.status !== 'RUNNING') {
         stopPolling();
+        fireNotification(data.email.failed + data.sms.failed);
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Unknown error');
