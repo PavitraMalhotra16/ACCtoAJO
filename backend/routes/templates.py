@@ -26,7 +26,7 @@ from db import (
     DestinationConnection, TemplateFolderConfig,
     TemplateMigrationRun, TemplateJobItem,
 )
-from core.security import get_login_from_cookie
+from core.security import get_login_from_cookie, get_valid_acc_token
 from pipeline.placeholder_config import RECIPIENT_MAPPINGS, get_ajo_mapping
 from pipeline.template_runner import run_template_migration
 from services.template_extractor import (
