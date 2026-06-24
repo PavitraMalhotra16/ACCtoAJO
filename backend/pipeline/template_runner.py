@@ -45,8 +45,12 @@ async def run_template(
     placeholder_map: dict,
     channel: str,
     db,
+    resume_from_step: int = 0,
 ) -> bool:
-    """Run all active pipeline steps for one template. Returns True on success."""
+    """Run all active pipeline steps for one template. Returns True on success.
+
+    resume_from_step: steps with order <= this value are skipped (already done).
+    """
     ctx = {
         "item_id": item_id,
         "source_id": source_id,
@@ -57,6 +61,9 @@ async def run_template(
     data: dict = {"channel": channel}
 
     for step in _ACTIVE_STEPS:
+        if step.order <= resume_from_step:
+            log.info("Template %s — skipping step %s (already completed)", source_id, step.name)
+            continue
         try:
             await _update_item(item_id, "RUNNING", step.name, step.order)
             handler = await _load_handler(step.handler)
@@ -90,6 +97,7 @@ async def _run_one(item: dict, placeholder_map: dict, sem: asyncio.Semaphore) ->
                         placeholder_map=placeholder_map,
                         channel=item["channel"],
                         db=db,
+                        resume_from_step=item.get("resume_from_step", 0),
                     )
             except Exception:
                 log.exception("Unhandled error running template item_id=%s source_id=%s",

@@ -399,6 +399,22 @@ async def template_migrate(
     )
     already_done: set[str] = {row[0] for row in completed_result.all()}
 
+    # For failed templates, find the latest failed item per source_id so we can resume
+    # from the step before where it broke rather than restarting from step 1.
+    failed_result = await db.execute(
+        select(TemplateJobItem)
+        .join(TemplateMigrationRun, TemplateJobItem.run_id == TemplateMigrationRun.run_id)
+        .where(
+            TemplateMigrationRun.login_id == login_id,
+            TemplateJobItem.status == "FAILED",
+        )
+        .order_by(TemplateJobItem.created_at.desc())
+    )
+    last_failed: dict[str, TemplateJobItem] = {}
+    for fi in failed_result.scalars().all():
+        if fi.source_id not in last_failed:
+            last_failed[fi.source_id] = fi
+
     run_id = str(uuid.uuid4())
     run = TemplateMigrationRun(
         run_id=run_id,
@@ -425,6 +441,9 @@ async def template_migrate(
         if channel not in ("email", "sms"):
             continue
 
+        prev_failed = last_failed.get(tmpl.source_id)
+        resume_from_step = max(0, (prev_failed.current_step_order or 1) - 1) if prev_failed else 0
+
         job_item = TemplateJobItem(
             run_id=run_id,
             source_id=tmpl.source_id,
@@ -441,6 +460,7 @@ async def template_migrate(
             "login_id": login_id,
             "destination_conn_id": dest.id,
             "channel": channel,
+            "resume_from_step": resume_from_step,
         })
 
     await db.commit()
