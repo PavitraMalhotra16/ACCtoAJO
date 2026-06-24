@@ -1,11 +1,11 @@
-import { BrowserRouter, Routes, Route, Navigate, Suspense } from 'react-router-dom'
+import React, { Suspense } from 'react'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import ConfigPage from './pages/ConfigPage'
 import MigrationTypePage from './pages/MigrationTypePage'
 import MigrationSelectPage from './pages/MigrationSelectPage'
 import MigrationRunPage from './pages/MigrationRunPage'
 import TemplateMigrationPage from './pages/TemplateMigrationPage'
 import { useConfigStore } from './store/configStore'
-import React from 'react'
 
 const TemplateAnalysisPage = React.lazy(() => import('./pages/TemplateAnalysisPage'))
 const TemplateRunPage = React.lazy(() => import('./pages/TemplateRunPage'))
