@@ -59,6 +59,19 @@ def _soap_url(instance_url: str) -> str:
     return instance_url.rstrip("/") + "/nl/jsp/soaprouter.jsp"
 
 
+async def _count_valid_stored(db: AsyncSession, login_id: str) -> int:
+    """Count stored templates excluding any that carry an excluded internalName.
+    Used as the SOAP pagination cursor so excluded rows don't skew the offset."""
+    result = await db.execute(
+        select(AccTemplateParsed.template_data)
+        .where(AccTemplateParsed.login_id == login_id)
+    )
+    return sum(
+        1 for td in result.scalars().all()
+        if json.loads(td or "{}").get("internalName") not in _EXCLUDED_INTERNAL_NAMES
+    )
+
+
 @router.get("/api/templates/stored-count")
 async def get_stored_count(
     acc_session: str | None = Cookie(default=None),
@@ -68,11 +81,7 @@ async def get_stored_count(
     login_id = await get_login_from_cookie(acc_session, db, acc_user)
     if not login_id:
         return {"stored": 0}  # session may have briefly expired during polling — return 0 silently
-    result = await db.execute(
-        select(func.count()).select_from(AccTemplateParsed)
-        .where(AccTemplateParsed.login_id == login_id)
-    )
-    return {"stored": result.scalar_one()}
+    return {"stored": await _count_valid_stored(db, login_id)}
 
 
 @router.get("/api/templates/count")
@@ -86,11 +95,7 @@ async def get_template_count(
     total = await count_templates(
         _soap_url(conn.instance_url), conn.session_token, conn.security_token
     )
-    stored_result = await db.execute(
-        select(func.count()).select_from(AccTemplateParsed)
-        .where(AccTemplateParsed.login_id == login_id)
-    )
-    stored = stored_result.scalar_one()
+    stored = await _count_valid_stored(db, login_id)
     to_migrate = max(0, total - stored)
     return {"total": total, "stored": stored, "to_migrate": to_migrate}
 
@@ -105,12 +110,9 @@ async def extract_templates(
     conn = await _require_acc(db, login_id)
     soap_url = _soap_url(conn.instance_url)
 
-    # Use stored count as cursor — next batch starts where the last one ended
-    stored_result = await db.execute(
-        select(func.count()).select_from(AccTemplateParsed)
-        .where(AccTemplateParsed.login_id == login_id)
-    )
-    start_line = stored_result.scalar_one()
+    # Cursor = count of valid (non-excluded) stored templates so the SOAP offset stays correct
+    # even if excluded rows exist in the DB from a previous extraction run
+    start_line = await _count_valid_stored(db, login_id)
 
     templates = await fetch_template_list(
         soap_url, conn.session_token, conn.security_token, start_line=start_line
@@ -129,6 +131,10 @@ async def extract_templates(
 
     for meta in templates:
         try:
+            if meta.get("internalName") in _EXCLUDED_INTERNAL_NAMES:
+                skipped += 1
+                continue
+
             existing = await db.execute(
                 select(AccTemplateParsed).where(
                     AccTemplateParsed.login_id == login_id,
