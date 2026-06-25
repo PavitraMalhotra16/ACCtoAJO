@@ -142,9 +142,12 @@ async def get_template_count(
     conn, token = await _require_acc(db, login_id)
     soap_token = "" if conn.auth_type == "technical" else token
     auth_hdrs = acc_soap_headers(conn, token)
-    total = await count_templates(
-        _soap_url(conn.instance_url), soap_token, conn.security_token or "", auth_headers=auth_hdrs
-    )
+    try:
+        total = await count_templates(
+            _soap_url(conn.instance_url), soap_token, conn.security_token or "", auth_headers=auth_hdrs
+        )
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc))
     to_migrate = max(0, total - stored)
     return {"total": total, "stored": stored, "to_migrate": to_migrate}
 
@@ -165,9 +168,12 @@ async def extract_templates(
     # with ACC's fixed ordering even when some rows were previously skipped/excluded
     start_line = await _soap_offset(db, login_id)
 
-    templates = await fetch_template_list(
-        soap_url, soap_token, conn.security_token or "", start_line=start_line, auth_headers=auth_hdrs
-    )
+    try:
+        templates = await fetch_template_list(
+            soap_url, soap_token, conn.security_token or "", start_line=start_line, auth_headers=auth_hdrs
+        )
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc))
     log.info("ACC template list returned %d template(s) (start_line=%d)", len(templates), start_line)
     if not templates:
         return {"extracted": 0, "total_found": 0, "skipped": 0, "batch_id": None, "errors": []}
@@ -392,9 +398,11 @@ async def template_analysis(
 
     for row in rows:
         parsed = json.loads(row.template_data or "{}")
-        html_body = (parsed.get("htmlBody", "") or "")
-        sms_content = (parsed.get("smsContent", "") or "")
-        text = html_body + " " + sms_content
+        text = (
+            (parsed.get("subject", "") or "") + " " +
+            (parsed.get("htmlBody", "") or "") + " " +
+            (parsed.get("smsContent", "") or "")
+        )
 
         # Fallback: if parsed content fields are empty, scan the raw XML directly
         if not text.strip():

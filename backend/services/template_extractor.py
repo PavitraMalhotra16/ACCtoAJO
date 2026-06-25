@@ -36,13 +36,15 @@ def _soap_headers(session_token: str, security_token: str, action: str = "xtk:qu
 
 
 async def count_templates(soap_url: str, session_token: str, security_token: str, auth_headers: dict | None = None) -> int:
-    headers = {**_soap_headers(session_token, security_token), **(auth_headers or {})}
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            soap_url,
-            content=build_count_templates_envelope(session_token, security_token),
-            headers=headers,
-        )
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                soap_url,
+                content=build_count_templates_envelope(session_token, security_token),
+                headers={**_soap_headers(session_token, security_token), **(auth_headers or {})},
+            )
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"Cannot reach ACC at {soap_url}: {exc}") from exc
     if resp.status_code != 200:
         raise RuntimeError(parse_fault(resp.text) or f"HTTP {resp.status_code} from ACC count")
     return parse_count_response(resp.text)
@@ -53,13 +55,15 @@ async def fetch_template_list(
 ) -> list[dict]:
     """Fetch exactly one page of templates from ACC starting at start_line."""
     page_size = settings.template_page_size
-    headers = {**_soap_headers(session_token, security_token), **(auth_headers or {})}
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(
-            soap_url,
-            content=build_list_templates_envelope(session_token, security_token, page_size, start_line),
-            headers=headers,
-        )
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                soap_url,
+                content=build_list_templates_envelope(session_token, security_token, page_size, start_line),
+                headers={**_soap_headers(session_token, security_token), **(auth_headers or {})},
+            )
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"Cannot reach ACC at {soap_url}: {exc}") from exc
     if resp.status_code != 200:
         raise RuntimeError(parse_fault(resp.text) or f"HTTP {resp.status_code} fetching template list")
     return parse_template_list(resp.text)
@@ -68,13 +72,15 @@ async def fetch_template_list(
 async def fetch_delivery_detail(
     soap_url: str, session_token: str, security_token: str, delivery_id: str, auth_headers: dict | None = None
 ) -> dict:
-    headers = {**_soap_headers(session_token, security_token), **(auth_headers or {})}
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            soap_url,
-            content=build_get_delivery_envelope(session_token, security_token, delivery_id),
-            headers=headers,
-        )
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                soap_url,
+                content=build_get_delivery_envelope(session_token, security_token, delivery_id),
+                headers={**_soap_headers(session_token, security_token), **(auth_headers or {})},
+            )
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"Cannot reach ACC at {soap_url}: {exc}") from exc
     if resp.status_code != 200:
         raise RuntimeError(parse_fault(resp.text) or f"HTTP {resp.status_code} fetching delivery id={delivery_id}")
     return parse_delivery_detail(resp.text)

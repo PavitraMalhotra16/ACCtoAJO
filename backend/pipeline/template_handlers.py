@@ -380,11 +380,12 @@ def _build_ajo_payload(enriched: dict, channel: str) -> dict:
         # rejects it for templateType html ("subType is only supported with ... code channel").
         # §4.3 says it is optional with no functional effect for email, so we leave it off.
         base["templateType"] = "html"
-        base["template"] = {"html": enriched.get("convertedHtml") or ""}
+        base["template"] = {"html": enriched.get("convertedHtml") or "", "editorContext": {}}
     elif channel == "sms":
-        # SMS uses templateType "content" ("text" is not valid) (§10).
+        # SMS uses templateType "content". AJO sms-variant-detail schema requires "text" (not
+        # "body") and has additionalProperties: false — editorContext must NOT be included.
         base["templateType"] = "content"
-        base["template"] = {"body": enriched.get("convertedSmsBody") or ""}
+        base["template"] = {"text": enriched.get("convertedSmsBody") or ""}
     else:
         raise TemplateSkipped(f"unsupported channel {channel!r} — must be email or sms")
     return base
@@ -431,8 +432,8 @@ async def validate_fields(ctx: dict, data: dict, db) -> dict:
     tmpl = payload.get("template") or {}
     if channels == ["email"] and not (tmpl.get("html") or "").strip():
         raise TemplateSkipped("template.html is required for email")
-    if channels == ["sms"] and not (tmpl.get("body") or "").strip():
-        raise TemplateSkipped("template.body is required for SMS")
+    if channels == ["sms"] and not (tmpl.get("text") or "").strip():
+        raise TemplateSkipped("template.text is required for SMS")
     if not (payload.get("parentFolderId") or "").strip():
         raise TemplateSkipped("parentFolderId is required and cannot be empty")
 

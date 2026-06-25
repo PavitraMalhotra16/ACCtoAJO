@@ -73,9 +73,11 @@ export default function TemplateMigrationPage() {
         if (result.total_found < 50) break
       }
 
-      // Read the final count from DB once — avoids any race from double-invocations.
-      const final = await getStoredCount()
-      setStored(final.stored)
+      // Re-query actual DB count — authoritative source of truth after extraction
+      const finalCounts = await getTemplateCount()
+      setStored(finalCounts.stored)
+      setTotal(finalCounts.total)
+      setExtracting(false)
       if (!stopRef.current) {
         await loadFolderConfig()
         setStep('setup')
