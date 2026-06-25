@@ -439,6 +439,7 @@ def build_count_templates_envelope(session_token: str, security_token: str) -> b
         "<where>"
         '<condition expr="@isModel = 1"/>'
         '<condition expr="@builtIn != 1"/>'
+        '<condition expr="@internalName != \'notifyWkfToStop\'"/>'
         "</where>"
         "</queryDef>"
         "</urn:entity>"
@@ -520,10 +521,13 @@ def build_get_delivery_envelope(session_token: str, security_token: str, deliver
         '<node expr="@lastModified"/>'
         '<node expr="desc"/>'
         '<node expr="data"/>'
-        '<node expr="NodeValue(\'delivery/mailParameters/subject\', data)" alias="subject"/>'
+        '<node expr="NodeValue(\'/delivery/mailParameters/subject\', data)" alias="subject"/>'
+        '<node expr="NodeValue(\'/delivery/content/sms/source\', data)" alias="smsText"/>'
+        '<node expr="NodeValue(\'/delivery/content/html/source\', data)" alias="htmlText"/>'
+        '<node expr="NodeValue(\'/delivery/content/text/source\', data)" alias="textText"/>'
         "</select>"
         "<where>"
-        f'<condition expr="@id = {_xml_escape(delivery_id)}"/>'
+        f'<condition expr="@id = {int(delivery_id)}"/>'
         '<condition expr="@isModel = 1"/>'
         "</where>"
         "</queryDef>"
@@ -647,11 +651,11 @@ def parse_delivery_detail(xml_text: str) -> dict:
     desc_el = _find(delivery_el, "desc")
     description = (desc_el.text or "").strip() if desc_el is not None else ""
 
-    # Subject: NodeValue alias is short enough — safe to use directly
+    # Subject: NodeValue alias (leading / fixed in envelope)
     subject_el = _find(delivery_el, "subject")
     subject_raw = (subject_el.text or "").strip() if subject_el is not None else ""
 
-    # Subject fallback: mailParameters/subject CDATA
+    # Subject fallback: mailParameters/subject child node
     if not subject_raw:
         mail_params = _find(delivery_el, "mailParameters")
         if mail_params is not None:
@@ -659,27 +663,58 @@ def parse_delivery_detail(xml_text: str) -> dict:
             if subj_el is not None:
                 subject_raw = (subj_el.text or "").strip()
 
-    # HTML: NodeValue truncates at ~1024 chars — always read from content/html/source CDATA
-    html_raw = ""
-    content_el = _find(delivery_el, "content")
-    if content_el is not None:
-        html_el = _find(content_el, "html")
-        if html_el is not None:
-            src_el = _find(html_el, "source")
-            if src_el is not None:
-                html_raw = (src_el.text or "").strip()
+    # NodeValue aliases for channel content
+    sms_alias = _find(delivery_el, "smsText")
+    html_alias = _find(delivery_el, "htmlText")
+    text_alias = _find(delivery_el, "textText")
 
-    # Text: read from content/text/source CDATA
-    text_raw = ""
-    if content_el is not None:
-        text_el = _find(content_el, "text") or _find(content_el, "textContent")
-        if text_el is not None:
-            src_el = _find(text_el, "source")
-            text_raw = (src_el.text if src_el is not None else (text_el.get("source", "") or text_el.text or "")).strip()
+    sms_raw = (sms_alias.text or "").strip() if sms_alias is not None else ""
+    html_raw = (html_alias.text or "").strip() if html_alias is not None else ""
+    text_raw = (text_alias.text or "").strip() if text_alias is not None else ""
 
-    sms_raw = text_raw if channel == "sms" else ""
+    # Fallback: parse the 'data' XML blob for full content
+    data_el = _find(delivery_el, "data")
+    if data_el is not None and data_el.text:
+        try:
+            inner = ET.fromstring(data_el.text)
+            content_el = inner.find("content")
+            if content_el is not None:
+                if not sms_raw:
+                    sms_src = content_el.find("sms/source")
+                    sms_raw = (sms_src.text or "").strip() if sms_src is not None else ""
+                if not html_raw:
+                    html_src = content_el.find("html/source")
+                    html_raw = (html_src.text or "").strip() if html_src is not None else ""
+                if not text_raw:
+                    text_src = content_el.find("text/source")
+                    text_raw = (text_src.text or "").strip() if text_src is not None else ""
+                if not subject_raw:
+                    subj = inner.find("mailParameters/subject")
+                    subject_raw = (subj.text or "").strip() if subj is not None else ""
+        except ET.ParseError:
+            pass
 
-    return {
+    # Final fallback: expanded child nodes
+    if not html_raw or not sms_raw:
+        content_el = _find(delivery_el, "content")
+        if content_el is not None:
+            if not sms_raw:
+                sms_el = _find(content_el, "sms")
+                if sms_el is not None:
+                    sms_src = _find(sms_el, "source")
+                    sms_raw = (sms_src.text or "").strip() if sms_src is not None else ""
+            if not html_raw:
+                html_el = _find(content_el, "html")
+                if html_el is not None:
+                    src_el = _find(html_el, "source")
+                    html_raw = (src_el.text or "").strip() if src_el is not None else ""
+            if not text_raw:
+                text_el = _find(content_el, "text") or _find(content_el, "textContent")
+                if text_el is not None:
+                    src_el = _find(text_el, "source")
+                    text_raw = (src_el.text if src_el is not None else (text_el.text or "")).strip()
+
+    result = {
         "id": delivery_el.get("id", ""),
         "internalName": delivery_el.get("internalName", ""),
         "label": delivery_el.get("label", delivery_el.get("_cs", "")),
@@ -693,6 +728,11 @@ def parse_delivery_detail(xml_text: str) -> dict:
         "smsRaw": sms_raw,
         "rawXml": ET.tostring(delivery_el, encoding="unicode"),
     }
+    log.info(
+        "parse_delivery_detail id=%s channel=%s html_len=%d sms_len=%d",
+        result["id"], channel, len(html_raw), len(sms_raw),
+    )
+    return result
 
 
 def parse_fault(xml_text: str) -> Optional[str]:

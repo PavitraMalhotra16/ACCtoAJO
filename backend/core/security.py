@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import SourceConnection, UserSession
 from services.acc_soap import (
-    build_bearer_token_logon_envelope,
     build_logon_envelope,
     parse_fault,
     parse_logon_response,
@@ -135,13 +134,12 @@ async def get_valid_acc_token(conn: SourceConnection, db: AsyncSession) -> str:
         log.info("Classic session refreshed for login_id=%s", conn.login_id)
         return session_token
 
-    # Technical auth below
-    # SOAP session token is still valid — return it directly
+    # Technical auth — return current IMS access_token if still valid
     if conn.token_expires_at and conn.token_expires_at > now + timedelta(seconds=60):
-        return conn.session_token or ""
+        return decrypt(conn.encrypted_access_token) if conn.encrypted_access_token else ""
 
-    # IMS token expired — refresh IMS then re-run BearerTokenLogon
-    log.info("IMS token expired for login_id=%s — refreshing via IMS + BearerTokenLogon", conn.login_id)
+    # IMS token expired — refresh from IMS only (no BearerTokenLogon)
+    log.info("IMS token expired for login_id=%s — refreshing via IMS", conn.login_id)
     creds = decrypt(conn.encrypted_credentials)
     client_id, client_secret = creds.split(":", 1)
 
@@ -163,36 +161,26 @@ async def get_valid_acc_token(conn: SourceConnection, db: AsyncSession) -> str:
     ims_payload = ims_resp.json()
     new_ims_token = ims_payload["access_token"]
     expires_in = int(ims_payload.get("expires_in", 3600))
-    if expires_in > 86_400:
-        expires_in //= 1000
-
-    # Exchange new IMS token for fresh ACC SOAP session/security tokens
-    soap_url = conn.instance_url.rstrip("/") + "/nl/jsp/soaprouter.jsp"
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        bearer_resp = await client.post(
-            soap_url,
-            content=build_bearer_token_logon_envelope(new_ims_token),
-            headers={
-                "Content-Type": "text/xml; charset=utf-8",
-                "SOAPAction": "xtk:session#BearerTokenLogon",
-            },
-        )
-
-    fault = parse_fault(bearer_resp.text)
-    if bearer_resp.status_code != 200 or fault:
-        raise RuntimeError(f"BearerTokenLogon refresh failed: {fault or bearer_resp.status_code}")
-
-    session_token, security_token = parse_logon_response(bearer_resp.text)
-    if not session_token:
-        raise RuntimeError("BearerTokenLogon refresh did not return a session token")
 
     conn.encrypted_access_token = encrypt(new_ims_token)
     conn.token_expires_at = now + timedelta(seconds=expires_in)
-    conn.session_token = session_token
-    conn.security_token = security_token or ""
     conn.last_authenticated_at = now
     await db.commit()
 
-    log.info("Tokens refreshed for login_id=%s (IMS + BearerTokenLogon), expires_in=%ss",
-             conn.login_id, expires_in)
-    return session_token
+    log.info("IMS token refreshed for login_id=%s, expires_in=%ss", conn.login_id, expires_in)
+    return new_ims_token
+
+
+def acc_soap_headers(conn: "SourceConnection", token: str) -> dict:
+    """
+    Returns auth-specific HTTP headers for ACC SOAP calls.
+
+    Classic: Cookie + X-Security-Token (session_token in envelope, security_token in header)
+    Technical: Authorization: Bearer (IMS access_token in header, empty envelope sessiontoken)
+    """
+    if conn.auth_type == "technical":
+        return {"Authorization": f"Bearer {token}"}
+    return {
+        "Cookie": f"__sessiontoken={token}",
+        "X-Security-Token": conn.security_token or "",
+    }
