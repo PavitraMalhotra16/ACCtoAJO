@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import SourceConnection, get_db
-from core.security import get_login_from_cookie, get_valid_acc_token
+from core.security import get_login_from_cookie, get_valid_acc_token, acc_soap_headers
 from services.acc_soap import build_list_schemas_envelope, build_srcschema_get_envelope, parse_schemas, parse_fault
 from services.schema_preview import parse_schema_preview
 
@@ -45,16 +45,16 @@ async def list_schemas(
 ):
     conn, token = await _get_acc_conn(acc_session, acc_user, db)
     soap_url = conn.instance_url.rstrip("/") + "/nl/jsp/soaprouter.jsp"
+    soap_token = "" if conn.auth_type == "technical" else token
 
     async with httpx.AsyncClient(timeout=SOAP_TIMEOUT) as client:
         resp = await client.post(
             soap_url,
-            content=build_list_schemas_envelope(token, conn.security_token or ""),
+            content=build_list_schemas_envelope(soap_token, conn.security_token or ""),
             headers={
                 "Content-Type": "text/xml; charset=utf-8",
                 "SOAPAction": "xtk:queryDef#ExecuteQuery",
-                "Cookie": f"__sessiontoken={token}",
-                "X-Security-Token": conn.security_token or "",
+                **acc_soap_headers(conn, token),
             },
         )
 
@@ -78,16 +78,16 @@ async def inspect_schema(
 ):
     conn, token = await _get_acc_conn(acc_session, acc_user, db)
     soap_url = conn.instance_url.rstrip("/") + "/nl/jsp/soaprouter.jsp"
+    soap_token = "" if conn.auth_type == "technical" else token
 
     async with httpx.AsyncClient(timeout=SOAP_TIMEOUT) as client:
         resp = await client.post(
             soap_url,
-            content=build_srcschema_get_envelope(token, conn.security_token or "", namespace, name),
+            content=build_srcschema_get_envelope(soap_token, conn.security_token or "", namespace, name),
             headers={
                 "Content-Type": "text/xml; charset=utf-8",
                 "SOAPAction": "xtk:queryDef#ExecuteQuery",
-                "Cookie": f"__sessiontoken={token}",
-                "X-Security-Token": conn.security_token or "",
+                **acc_soap_headers(conn, token),
             },
         )
 
@@ -117,17 +117,18 @@ _DEP_HEADERS = {
 async def _fetch_links(
     client: httpx.AsyncClient,
     soap_url: str,
-    token: str,
+    soap_token: str,
     security_token: str,
     namespace: str,
     name: str,
+    auth_headers: dict,
 ) -> tuple[str, list[dict]]:
     """Fetch a single srcSchema and return (schema_key, links[])."""
     try:
         resp = await client.post(
             soap_url,
-            content=build_srcschema_get_envelope(token, security_token, namespace, name),
-            headers={**_DEP_HEADERS, "Cookie": f"__sessiontoken={token}", "X-Security-Token": security_token},
+            content=build_srcschema_get_envelope(soap_token, security_token, namespace, name),
+            headers={**_DEP_HEADERS, **auth_headers},
         )
         parsed = parse_schema_preview(resp.text, namespace, name)
         return f"{namespace}:{name}", parsed.get("links", [])
@@ -168,12 +169,14 @@ async def get_dependency_graph(
         raise HTTPException(401, str(e))
 
     soap_url = conn.instance_url.rstrip("/") + "/nl/jsp/soaprouter.jsp"
+    soap_token = "" if conn.auth_type == "technical" else token
+    auth_hdrs = acc_soap_headers(conn, token)
 
     async with httpx.AsyncClient(timeout=SOAP_TIMEOUT) as client:
         list_resp = await client.post(
             soap_url,
-            content=build_list_schemas_envelope(token, conn.security_token or ""),
-            headers={**_DEP_HEADERS, "Cookie": f"__sessiontoken={token}", "X-Security-Token": conn.security_token or ""},
+            content=build_list_schemas_envelope(soap_token, conn.security_token or ""),
+            headers={**_DEP_HEADERS, **auth_hdrs},
         )
     all_schemas = parse_schemas(list_resp.text)
     custom = [s for s in all_schemas if s.get("namespace", "").lower() not in SYSTEM_NAMESPACES]
@@ -181,7 +184,7 @@ async def get_dependency_graph(
 
     async with httpx.AsyncClient(timeout=SOAP_TIMEOUT) as client:
         tasks = [
-            _fetch_links(client, soap_url, token, conn.security_token or "", s["namespace"], s["name"])
+            _fetch_links(client, soap_url, soap_token, conn.security_token or "", s["namespace"], s["name"], auth_hdrs)
             for s in custom
         ]
         results = await asyncio.gather(*tasks)

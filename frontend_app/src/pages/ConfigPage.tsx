@@ -20,7 +20,7 @@ export default function ConfigPage() {
       if (s.connected && s.org_id && s.sandbox_name) setAjoConnected(s.org_id, s.sandbox_name)
     })
 
-    // Resume active migration job if one is in progress
+    // Resume active schema migration job if one is in progress
     listMigrationJobs().then(async ({ jobs }) => {
       if (!jobs.length) return
       const latest = jobs[0]
@@ -29,6 +29,25 @@ export default function ConfigPage() {
         navigate(`/migration/run?migrate_job=${latest.job_id}`)
       }
     }).catch(() => {/* not authenticated yet, ignore */})
+
+    // Resume active template migration run if one is in progress or recently completed
+    const lastRunId = localStorage.getItem('lastTemplateRunId')
+    if (lastRunId) {
+      fetch(`/api/templates/runs/${lastRunId}/status`, { credentials: 'include' })
+        .then(async r => {
+          if (!r.ok) {
+            localStorage.removeItem('lastTemplateRunId')
+            return
+          }
+          const data = await r.json()
+          if (data.status === 'RUNNING' || data.status === 'COMPLETED') {
+            navigate(`/migration/template/run/${lastRunId}`)
+          } else {
+            localStorage.removeItem('lastTemplateRunId')
+          }
+        })
+        .catch(() => {/* not authenticated yet, ignore */})
+    }
   }, [])
 
   function handleMigrate() {

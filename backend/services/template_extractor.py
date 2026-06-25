@@ -35,7 +35,8 @@ def _soap_headers(session_token: str, security_token: str, action: str = "xtk:qu
     }
 
 
-async def count_templates(soap_url: str, session_token: str, security_token: str) -> int:
+async def count_templates(soap_url: str, session_token: str, security_token: str, auth_headers: dict | None = None) -> int:
+    headers = {**_HEADERS, **(auth_headers or {})}
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
             soap_url,
@@ -48,10 +49,11 @@ async def count_templates(soap_url: str, session_token: str, security_token: str
 
 
 async def fetch_template_list(
-    soap_url: str, session_token: str, security_token: str, start_line: int = 0
+    soap_url: str, session_token: str, security_token: str, start_line: int = 0, auth_headers: dict | None = None
 ) -> list[dict]:
     """Fetch exactly one page of templates from ACC starting at start_line."""
     page_size = settings.template_page_size
+    headers = {**_HEADERS, **(auth_headers or {})}
     async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.post(
             soap_url,
@@ -64,8 +66,9 @@ async def fetch_template_list(
 
 
 async def fetch_delivery_detail(
-    soap_url: str, session_token: str, security_token: str, delivery_id: str
+    soap_url: str, session_token: str, security_token: str, delivery_id: str, auth_headers: dict | None = None
 ) -> dict:
+    headers = {**_HEADERS, **(auth_headers or {})}
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
             soap_url,

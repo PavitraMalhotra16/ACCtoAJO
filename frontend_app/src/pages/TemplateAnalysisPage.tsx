@@ -67,6 +67,7 @@ export default function TemplateAnalysisPage() {
         throw new Error(d.detail || `Error ${res.status}`);
       }
       const { run_id } = await res.json();
+      localStorage.setItem('lastTemplateRunId', run_id);
       navigate(`/migration/template/run/${run_id}`);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Unknown error');
