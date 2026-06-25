@@ -35,29 +35,4 @@ TEMPLATE_PIPELINE_STEPS: list[TemplatePipelineStep] = [
         handler="pipeline.template_handlers.build_enriched",
         order=4,
     ),
-    # ── Push to AJO (TEMPLATES.md §4–§8) ──────────────────────────────────────
-    TemplatePipelineStep(
-        name="BUILD_PAYLOAD",
-        label="Build final AJO API payload",
-        handler="pipeline.template_handlers.build_payload",
-        order=5,
-    ),
-    TemplatePipelineStep(
-        name="VALIDATE_FIELDS",
-        label="Validate required fields",
-        handler="pipeline.template_handlers.validate_fields",
-        order=6,
-    ),
-    TemplatePipelineStep(
-        name="PUSH_TEMPLATE",
-        label="POST template to AJO",
-        handler="pipeline.template_handlers.push_template",
-        order=7,
-    ),
-    TemplatePipelineStep(
-        name="VERIFY",
-        label="Verify template created in AJO",
-        handler="pipeline.template_handlers.verify",
-        order=8,
-    ),
 ]
