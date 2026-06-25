@@ -503,6 +503,8 @@ async def push_template(ctx: dict, data: dict, db) -> dict:
 
         detail = _error_detail(resp)
         if code == 400:
+            log.error("AJO 400 payload: %s", json.dumps(payload))
+            log.error("AJO 400 full response: %s", resp.text[:1000])
             raise TemplateFailed(f"400: {detail}")
         if code == 401:
             if did_refresh:
