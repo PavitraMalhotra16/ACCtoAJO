@@ -35,33 +35,29 @@ TEMPLATE_PIPELINE_STEPS: list[TemplatePipelineStep] = [
         handler="pipeline.template_handlers.build_enriched",
         order=4,
     ),
-    # ── Stubs for next developer ──────────────────────────────────────────────
-    TemplatePipelineStep(
-        name="DUPLICATE_CHECK",
-        label="Check if template already exists in AJO",
-        handler="pipeline.template_handlers.duplicate_check_stub",
-        order=5,
-        stub=True,
-    ),
+    # ── Push to AJO (TEMPLATES.md §4–§8) ──────────────────────────────────────
     TemplatePipelineStep(
         name="BUILD_PAYLOAD",
         label="Build final AJO API payload",
-        handler="pipeline.template_handlers.build_payload_stub",
+        handler="pipeline.template_handlers.build_payload",
+        order=5,
+    ),
+    TemplatePipelineStep(
+        name="VALIDATE_FIELDS",
+        label="Validate required fields",
+        handler="pipeline.template_handlers.validate_fields",
         order=6,
-        stub=True,
     ),
     TemplatePipelineStep(
         name="PUSH_TEMPLATE",
         label="POST template to AJO",
-        handler="pipeline.template_handlers.push_template_stub",
+        handler="pipeline.template_handlers.push_template",
         order=7,
-        stub=True,
     ),
     TemplatePipelineStep(
         name="VERIFY",
         label="Verify template created in AJO",
-        handler="pipeline.template_handlers.verify_stub",
+        handler="pipeline.template_handlers.verify",
         order=8,
-        stub=True,
     ),
 ]

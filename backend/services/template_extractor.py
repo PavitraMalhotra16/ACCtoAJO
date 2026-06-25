@@ -24,7 +24,15 @@ from services.acc_soap import (
 )
 
 log = logging.getLogger("acc_backend.template_extractor")
-_HEADERS = {"Content-Type": "text/xml; charset=utf-8", "SOAPAction": "xtk:queryDef#ExecuteQuery"}
+
+
+def _soap_headers(session_token: str, security_token: str, action: str = "xtk:queryDef#ExecuteQuery") -> dict:
+    return {
+        "Content-Type": "text/xml; charset=utf-8",
+        "SOAPAction": action,
+        "Cookie": f"__sessiontoken={session_token}",
+        "X-Security-Token": security_token,
+    }
 
 
 async def count_templates(soap_url: str, session_token: str, security_token: str, auth_headers: dict | None = None) -> int:
@@ -33,7 +41,11 @@ async def count_templates(soap_url: str, session_token: str, security_token: str
         resp = await client.post(
             soap_url,
             content=build_count_templates_envelope(session_token, security_token),
+<<<<<<< HEAD
             headers=headers,
+=======
+            headers=_soap_headers(session_token, security_token),
+>>>>>>> origin/template_ajo
         )
     if resp.status_code != 200:
         raise RuntimeError(parse_fault(resp.text) or f"HTTP {resp.status_code} from ACC count")
@@ -50,7 +62,11 @@ async def fetch_template_list(
         resp = await client.post(
             soap_url,
             content=build_list_templates_envelope(session_token, security_token, page_size, start_line),
+<<<<<<< HEAD
             headers=headers,
+=======
+            headers=_soap_headers(session_token, security_token),
+>>>>>>> origin/template_ajo
         )
     if resp.status_code != 200:
         raise RuntimeError(parse_fault(resp.text) or f"HTTP {resp.status_code} fetching template list")
@@ -65,7 +81,11 @@ async def fetch_delivery_detail(
         resp = await client.post(
             soap_url,
             content=build_get_delivery_envelope(session_token, security_token, delivery_id),
+<<<<<<< HEAD
             headers=headers,
+=======
+            headers=_soap_headers(session_token, security_token),
+>>>>>>> origin/template_ajo
         )
     if resp.status_code != 200:
         raise RuntimeError(parse_fault(resp.text) or f"HTTP {resp.status_code} fetching delivery id={delivery_id}")
