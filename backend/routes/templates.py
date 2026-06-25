@@ -138,13 +138,15 @@ async def get_template_count(
     db: AsyncSession = Depends(get_db),
 ):
     login_id = await get_login_from_cookie(acc_session, db, acc_user)
+    stored = await _count_valid_stored(db, login_id)
+    if stored > 0:
+        return {"total": stored, "stored": stored, "to_migrate": 0}
     conn, token = await _require_acc(db, login_id)
     soap_token = "" if conn.auth_type == "technical" else token
     auth_hdrs = acc_soap_headers(conn, token)
     total = await count_templates(
         _soap_url(conn.instance_url), soap_token, conn.security_token or "", auth_headers=auth_hdrs
     )
-    stored = await _count_valid_stored(db, login_id)
     to_migrate = max(0, total - stored)
     return {"total": total, "stored": stored, "to_migrate": to_migrate}
 
@@ -376,6 +378,7 @@ async def template_analysis(
         if json.loads(r.template_data or "{}").get("internalName") not in _EXCLUDED_INTERNAL_NAMES
     ]
 
+<<<<<<< HEAD
     # Also load raw XML rows keyed by source_id for fallback placeholder scanning
     raw_result = await db.execute(
         select(AccTemplateRaw).where(AccTemplateRaw.login_id == login_id)
@@ -386,11 +389,16 @@ async def template_analysis(
 
     re_recipient = re.compile(r"<%=\s*(recipient\.[\w.]+)\s*%>")
     re_target = re.compile(r"<%=\s*(targetData\.[\w.]+)\s*%>")
+=======
+    re_recipient = re.compile(r"(?:<%=|&lt;%=)\s*(recipient\.[\w.]+)\s*(?:%>|%&gt;)")
+    re_target = re.compile(r"(?:<%=|&lt;%=)\s*(targetData\.[\w.]+)\s*(?:%>|%&gt;)")
+>>>>>>> dd78022dd8817b64d832013cc6025f840339690d
 
     unique_recipient: dict[str, str] = {}
     unique_target: dict[str, str] = {}
 
     for row in rows:
+<<<<<<< HEAD
         parsed = json.loads(row.template_data or "{}")
         html_body = (parsed.get("htmlBody", "") or "")
         sms_content = (parsed.get("smsContent", "") or "")
@@ -404,6 +412,16 @@ async def template_analysis(
                 row.source_id, len(text),
             )
 
+=======
+        if not row.template_data:
+            continue
+        parsed = json.loads(row.template_data)
+        text = (
+            (parsed.get("subject", "") or "") + " " +
+            (parsed.get("htmlBody", "") or "") + " " +
+            (parsed.get("smsContent", "") or "")
+        )
+>>>>>>> dd78022dd8817b64d832013cc6025f840339690d
         for m in re_recipient.finditer(text):
             field = m.group(1)
             if field not in unique_recipient:
@@ -647,15 +665,26 @@ async def template_run_status(
                 out["halted"] += r.cnt
         return out
 
+    all_items_result = await db.execute(
+        select(TemplateJobItem).where(TemplateJobItem.run_id == run_id)
+    )
+    all_items = all_items_result.scalars().all()
+
     failures = []
-    if run.status in ("COMPLETED", "HALTED"):
-        review_result = await db.execute(
-            select(TemplateJobItem).where(
-                TemplateJobItem.run_id == run_id,
-                TemplateJobItem.status.in_(_REVIEW_STATUSES),
-            )
-        )
-        for fi in review_result.scalars().all():
+    items = []
+    for fi in all_items:
+        items.append({
+            "source_id": fi.source_id,
+            "internal_name": fi.internal_name,
+            "channel": fi.channel,
+            "status": fi.status,
+            "current_step": fi.current_step,
+            "current_step_order": fi.current_step_order,
+            "error_step": fi.error_step,
+            "error_message": fi.error_message,
+            "ajo_template_id": fi.ajo_template_id,
+        })
+        if fi.status in _REVIEW_STATUSES:
             failures.append({
                 "source_id": fi.source_id,
                 "internal_name": fi.internal_name,
@@ -670,5 +699,6 @@ async def template_run_status(
         "status": run.status,
         "email": _tally("email"),
         "sms": _tally("sms"),
+        "items": items,
         "failures": failures,
     }

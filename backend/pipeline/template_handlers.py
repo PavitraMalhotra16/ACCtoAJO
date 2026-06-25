@@ -52,8 +52,8 @@ class FatalRunError(Exception):
     """403/406 config-level error — runner aborts the whole run (HALTED)."""
 
 # ── Regex patterns ────────────────────────────────────────────────────────────
-_RE_RECIPIENT = re.compile(r"<%=\s*(recipient\.\w+)\s*%>")
-_RE_TARGET_DATA = re.compile(r"<%=\s*(targetData\.\w+)\s*%>")
+_RE_RECIPIENT = re.compile(r"(?:<%=|&lt;%=)\s*(recipient\.[\w.]+)\s*(?:%>|%&gt;)")
+_RE_TARGET_DATA = re.compile(r"(?:<%=|&lt;%=)\s*(targetData\.[\w.]+)\s*(?:%>|%&gt;)")
 _RE_SCRIPTLET = re.compile(r"<%@[^%]*%>")
 _RE_CONTROL = re.compile(r"<%\s*(if|for|else|end)\b")
 _RE_EXPR_GENERIC = re.compile(r"<%=([^%]+)%>")
