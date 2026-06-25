@@ -1,6 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 
+const TOTAL_STEPS = 8;
+
+const STEP_LABELS: Record<string, string> = {
+  LOAD_RAW: 'Load template from DB',
+  CONVERT_PLACEHOLDERS: 'Convert placeholders',
+  RESOLVE_FOLDER: 'Resolve AJO folder',
+  BUILD_ENRICHED: 'Write enriched JSON',
+  BUILD_PAYLOAD: 'Build AJO payload',
+  VALIDATE_FIELDS: 'Validate fields',
+  PUSH_TEMPLATE: 'Push to AJO',
+  VERIFY: 'Verify in AJO',
+};
+
 interface ChannelCounts {
   total: number;
   completed: number;
@@ -9,6 +22,18 @@ interface ChannelCounts {
   manual: number;
   verification_failed: number;
   halted: number;
+}
+
+interface TemplateItem {
+  source_id: string;
+  internal_name: string | null;
+  channel: string;
+  status: string;
+  current_step: string | null;
+  current_step_order: number;
+  error_step: string | null;
+  error_message: string | null;
+  ajo_template_id: string | null;
 }
 
 interface FailureItem {
@@ -25,7 +50,73 @@ interface RunStatus {
   status: string;
   email: ChannelCounts;
   sms: ChannelCounts;
+  items: TemplateItem[];
   failures: FailureItem[];
+}
+
+function TemplateCard({ item }: { item: TemplateItem }) {
+  const isDone = item.status === 'COMPLETED';
+  const isFailed = ['FAILED', 'MANUAL', 'VERIFICATION_FAILED', 'HALTED'].includes(item.status);
+  const isRunning = item.status === 'RUNNING';
+
+  const stepOrder = item.current_step_order ?? 0;
+  const pct = isDone ? 100 : Math.round((stepOrder / TOTAL_STEPS) * 100);
+
+  const barColor = isFailed
+    ? 'bg-red-400'
+    : isDone
+      ? 'bg-green-500'
+      : 'bg-blue-500';
+
+  const statusBadge = isDone
+    ? 'bg-green-100 text-green-700'
+    : isFailed
+      ? 'bg-red-100 text-red-700'
+      : isRunning
+        ? 'bg-blue-100 text-blue-700'
+        : 'bg-gray-100 text-gray-500';
+
+  const stepLabel = item.current_step ? (STEP_LABELS[item.current_step] ?? item.current_step) : '—';
+
+  return (
+    <div className="border border-gray-200 rounded-lg p-4 mb-3 bg-white">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-sm font-medium text-gray-800">
+            {item.internal_name ?? item.source_id}
+          </span>
+          <span className="text-xs text-gray-400 uppercase">{item.channel}</span>
+        </div>
+        <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${statusBadge}`}>
+          {item.status}
+        </span>
+      </div>
+
+      <div className="w-full bg-gray-100 rounded-full h-2 mb-1">
+        <div
+          className={`h-2 rounded-full transition-all duration-500 ${barColor}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+
+      <div className="flex justify-between text-xs text-gray-400 mt-1">
+        <span>
+          {isDone
+            ? 'All steps complete'
+            : isFailed
+              ? `Failed at: ${item.error_step ?? stepLabel}`
+              : `Step ${stepOrder}/${TOTAL_STEPS}: ${stepLabel}`}
+        </span>
+        <span>{pct}%</span>
+      </div>
+
+      {isFailed && item.error_message && (
+        <div className="mt-2 text-xs text-red-600 bg-red-50 border border-red-100 rounded p-2 break-all">
+          {item.error_message}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function ProgressBar({ label, counts }: { label: string; counts: ChannelCounts }) {
@@ -73,9 +164,7 @@ export default function TemplateRunPage() {
       }
       const data: RunStatus = await res.json();
       setStatus(data);
-      if (data.status !== 'RUNNING') {
-        stopPolling();
-      }
+      if (data.status !== 'RUNNING') stopPolling();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Unknown error');
       stopPolling();
@@ -90,7 +179,7 @@ export default function TemplateRunPage() {
 
   if (error) {
     return (
-      <div className="max-w-2xl mx-auto p-8">
+      <div className="max-w-3xl mx-auto p-8">
         <div className="text-red-600 bg-red-50 border border-red-200 rounded p-4">{error}</div>
       </div>
     );
@@ -127,8 +216,10 @@ export default function TemplateRunPage() {
       : 'bg-blue-100 text-blue-700';
   const badgeLabel = isHalted ? 'Halted' : isDone ? 'Completed' : 'Running…';
 
+  const items = status.items ?? [];
+
   return (
-    <div className="max-w-2xl mx-auto p-8">
+    <div className="max-w-3xl mx-auto p-8">
       <div className="flex items-center gap-3 mb-6">
         <h1 className="text-2xl font-bold">Template Migration</h1>
         <span className={`text-xs font-semibold px-2 py-1 rounded-full ${badgeClass}`}>
@@ -140,10 +231,11 @@ export default function TemplateRunPage() {
         <div className="mb-6 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-4">
           Run halted by a config-level error (permissions <span className="font-mono">403</span> or
           headers <span className="font-mono">406</span>). These affect every template — fix the AJO
-          product-profile permissions or connection, then re-run. Remaining templates were not pushed.
+          product-profile permissions or connection, then re-run.
         </div>
       )}
 
+      {/* Overall progress bars */}
       <div className="bg-white border border-gray-200 rounded-xl p-6 mb-6">
         {emailTotal > 0 && <ProgressBar label="Email templates" counts={status.email} />}
         {smsTotal > 0 && <ProgressBar label="SMS templates" counts={status.sms} />}
@@ -151,6 +243,18 @@ export default function TemplateRunPage() {
           <ProgressBar label="Overall" counts={overallCounts} />
         </div>
       </div>
+
+      {/* Per-template step cards */}
+      {items.length > 0 && (
+        <div className="mb-6">
+          <h2 className="font-semibold text-gray-700 mb-3 text-sm uppercase tracking-wide">
+            Per-template progress ({TOTAL_STEPS} steps each)
+          </h2>
+          {items.map(item => (
+            <TemplateCard key={item.source_id} item={item} />
+          ))}
+        </div>
+      )}
 
       {isDone && (
         <div className="bg-white border border-gray-200 rounded-xl p-6">
@@ -165,7 +269,9 @@ export default function TemplateRunPage() {
               <div className="text-xs text-gray-500">SMS migrated</div>
             </div>
             <div>
-              <div className={`text-2xl font-bold ${overallFailed > 0 ? 'text-red-500' : 'text-green-600'}`}>{overallFailed}</div>
+              <div className={`text-2xl font-bold ${overallFailed > 0 ? 'text-red-500' : 'text-green-600'}`}>
+                {overallFailed}
+              </div>
               <div className="text-xs text-gray-500">Failed</div>
             </div>
           </div>

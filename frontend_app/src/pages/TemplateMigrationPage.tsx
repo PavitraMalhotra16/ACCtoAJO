@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { getTemplateCount, extractTemplates } from '../api/templates'
+import { getTemplateCount, getStoredCount, extractTemplates } from '../api/templates'
 
 type Step = 'extracting' | 'setup'
 
@@ -44,6 +44,19 @@ export default function TemplateMigrationPage() {
     try {
       if (forceRefresh) {
         await fetch('/api/templates/stored', { method: 'DELETE', credentials: 'include' })
+      } else {
+        // Fast path: check DB only first — avoids a slow SOAP round-trip to ACC
+        const quick = await getStoredCount()
+        if (quick.stored > 0) {
+          setStored(quick.stored)
+          setTotal(quick.stored)
+          setExtracting(false)
+          if (!stopRef.current) {
+            await loadFolderConfig()
+            setStep('setup')
+          }
+          return
+        }
       }
 
       const counts = await getTemplateCount()
@@ -60,15 +73,16 @@ export default function TemplateMigrationPage() {
         return
       }
 
-      let storedSoFar = counts.stored
       while (!stopRef.current) {
         const result = await extractTemplates()
         if (result.total_found === 0) break
-        storedSoFar += result.extracted
-        setStored(storedSoFar)
         if (result.total_found < 50) break
       }
 
+      // Read the final count from DB once — avoids any race from double-invocations.
+      const final = await getStoredCount()
+      setStored(final.stored)
+      setTotal(final.stored)
       setExtracting(false)
       if (!stopRef.current) {
         await loadFolderConfig()
