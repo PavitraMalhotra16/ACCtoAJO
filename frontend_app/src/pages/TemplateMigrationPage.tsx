@@ -19,9 +19,7 @@ export default function TemplateMigrationPage() {
   const [step, setStep] = useState<Step>('extracting')
 
   // ── Extraction state ───────────────────────────────────────────────────────
-  const [total, setTotal] = useState(0)
   const [stored, setStored] = useState(0)
-  const [extracting, setExtracting] = useState(true)
   const [extractError, setExtractError] = useState<string | null>(null)
   const stopRef = useRef(false)
 
@@ -49,8 +47,6 @@ export default function TemplateMigrationPage() {
         const quick = await getStoredCount()
         if (quick.stored > 0) {
           setStored(quick.stored)
-          setTotal(quick.stored)
-          setExtracting(false)
           if (!stopRef.current) {
             await loadFolderConfig()
             setStep('setup')
@@ -60,12 +56,10 @@ export default function TemplateMigrationPage() {
       }
 
       const counts = await getTemplateCount()
-      setTotal(counts.total)
       setStored(counts.stored)
 
       // If everything is already stored, skip extraction
       if (counts.to_migrate === 0) {
-        setExtracting(false)
         if (!stopRef.current) {
           await loadFolderConfig()
           setStep('setup')
@@ -79,25 +73,15 @@ export default function TemplateMigrationPage() {
         if (result.total_found < 50) break
       }
 
-<<<<<<< HEAD
-      // Re-query actual DB count — authoritative source of truth after extraction
-      const finalCounts = await getTemplateCount()
-      setStored(finalCounts.stored)
-      setTotal(finalCounts.total)
-=======
       // Read the final count from DB once — avoids any race from double-invocations.
       const final = await getStoredCount()
       setStored(final.stored)
-      setTotal(final.stored)
->>>>>>> dd78022dd8817b64d832013cc6025f840339690d
-      setExtracting(false)
       if (!stopRef.current) {
         await loadFolderConfig()
         setStep('setup')
       }
     } catch (err: unknown) {
       setExtractError(err instanceof Error ? err.message : 'Extraction failed')
-      setExtracting(false)
     }
   }
 
@@ -145,7 +129,6 @@ export default function TemplateMigrationPage() {
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
-  const pct = total > 0 ? Math.round((stored / total) * 100) : 0
   const alreadyConfigured = folderConfig?.configured && !renaming
 
   return (
@@ -177,7 +160,6 @@ export default function TemplateMigrationPage() {
               <button
                 onClick={() => {
                   setStep('extracting')
-                  setExtracting(true)
                   setExtractError(null)
                   stopRef.current = false
                   runExtraction(true)

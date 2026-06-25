@@ -225,9 +225,6 @@ function MigrationDashboard({
   const completed = allSchemas.filter(s => s.status === 'COMPLETED')
   const failed = allSchemas.filter(s => s.status === 'FAILED')
   const queued = allSchemas.filter(s => s.status === 'QUEUED')
-  const identityUnresolved = allSchemas.filter(
-    s => s.status === 'COMPLETED' && s.identity_is_primary === null
-  ).length
   const allDone = inProgress.length === 0 && queued.length === 0
   const total = allSchemas.length
   const QUEUED_PREVIEW = 2
