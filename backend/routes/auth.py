@@ -342,13 +342,8 @@ async def acc_status(
 
 @router.get("/api/ajo/status")
 async def ajo_status(
-    acc_session: Optional[str] = Cookie(default=None),
-    acc_user: Optional[str] = Cookie(default=None),
     db: AsyncSession = Depends(get_db),
 ):
-    login_id = await get_login_from_cookie(acc_session, db, acc_user)
-    if not login_id:
-        return {"connected": False, "org_id": None, "sandbox_name": None}
     result = await db.execute(
         select(DestinationConnection).where(DestinationConnection.authenticated == True)
     )
