@@ -21,14 +21,12 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db import AccTemplateRaw, AccTemplateParsed, SourceConnection, get_db
-from core.security import get_login_from_cookie, get_valid_acc_token, acc_soap_headers
 from db import (
     AccTemplateRaw, AccTemplateParsed, AsyncSessionLocal, SourceConnection, get_db,
     DestinationConnection, TemplateFolderConfig,
     TemplateMigrationRun, TemplateJobItem,
 )
-from core.security import get_login_from_cookie, get_valid_acc_token
+from core.security import get_login_from_cookie, get_valid_acc_token, acc_soap_headers
 from pipeline.placeholder_config import RECIPIENT_MAPPINGS, get_ajo_mapping
 from pipeline.template_runner import run_template_migration
 from services.template_extractor import (
@@ -378,7 +376,6 @@ async def template_analysis(
         if json.loads(r.template_data or "{}").get("internalName") not in _EXCLUDED_INTERNAL_NAMES
     ]
 
-<<<<<<< HEAD
     # Also load raw XML rows keyed by source_id for fallback placeholder scanning
     raw_result = await db.execute(
         select(AccTemplateRaw).where(AccTemplateRaw.login_id == login_id)
@@ -389,16 +386,11 @@ async def template_analysis(
 
     re_recipient = re.compile(r"<%=\s*(recipient\.[\w.]+)\s*%>")
     re_target = re.compile(r"<%=\s*(targetData\.[\w.]+)\s*%>")
-=======
-    re_recipient = re.compile(r"(?:<%=|&lt;%=)\s*(recipient\.[\w.]+)\s*(?:%>|%&gt;)")
-    re_target = re.compile(r"(?:<%=|&lt;%=)\s*(targetData\.[\w.]+)\s*(?:%>|%&gt;)")
->>>>>>> dd78022dd8817b64d832013cc6025f840339690d
 
     unique_recipient: dict[str, str] = {}
     unique_target: dict[str, str] = {}
 
     for row in rows:
-<<<<<<< HEAD
         parsed = json.loads(row.template_data or "{}")
         html_body = (parsed.get("htmlBody", "") or "")
         sms_content = (parsed.get("smsContent", "") or "")
@@ -412,16 +404,6 @@ async def template_analysis(
                 row.source_id, len(text),
             )
 
-=======
-        if not row.template_data:
-            continue
-        parsed = json.loads(row.template_data)
-        text = (
-            (parsed.get("subject", "") or "") + " " +
-            (parsed.get("htmlBody", "") or "") + " " +
-            (parsed.get("smsContent", "") or "")
-        )
->>>>>>> dd78022dd8817b64d832013cc6025f840339690d
         for m in re_recipient.finditer(text):
             field = m.group(1)
             if field not in unique_recipient:
