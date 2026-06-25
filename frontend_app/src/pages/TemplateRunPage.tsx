@@ -244,15 +244,17 @@ export default function TemplateRunPage() {
         </div>
       </div>
 
-      {/* Per-template step cards */}
-      {items.length > 0 && (
+      {/* Failed/errored templates only */}
+      {items.filter(i => ['FAILED', 'MANUAL', 'VERIFICATION_FAILED', 'HALTED', 'SKIPPED'].includes(i.status)).length > 0 && (
         <div className="mb-6">
           <h2 className="font-semibold text-gray-700 mb-3 text-sm uppercase tracking-wide">
-            Per-template progress ({TOTAL_STEPS} steps each)
+            Templates with errors
           </h2>
-          {items.map(item => (
-            <TemplateCard key={item.source_id} item={item} />
-          ))}
+          {items
+            .filter(i => ['FAILED', 'MANUAL', 'VERIFICATION_FAILED', 'HALTED', 'SKIPPED'].includes(i.status))
+            .map(item => (
+              <TemplateCard key={item.source_id} item={item} />
+            ))}
         </div>
       )}
 
