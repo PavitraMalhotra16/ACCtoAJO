@@ -248,7 +248,10 @@ async def _require_ajo(db: AsyncSession) -> DestinationConnection:
 
 async def _get_valid_ajo_token(dest: DestinationConnection, db: AsyncSession) -> str:
     from pipeline.handlers import get_valid_access_token  # deferred to avoid circular import
-    return await get_valid_access_token(dest, db)
+    try:
+        return await get_valid_access_token(dest, db)
+    except ValueError as e:
+        raise HTTPException(401, str(e))
 
 
 class SetupRequest(BaseModel):
