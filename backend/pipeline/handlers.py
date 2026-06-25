@@ -219,9 +219,13 @@ def _compute_behavior(keys: dict, source_name: str, root_name: str) -> str:
 
 
 def _compute_version_field(attributes: list[dict], primary_key: list[str], xdm_types: dict) -> str | None:
-    """Version field must be datetime or numeric, and must not be in primaryKey."""
+    """Version field must be datetime or numeric, and must not be in primaryKey.
+
+    AEP xdm:descriptorVersion requires number, integer, or string with format date-time.
+    Plain 'date' fields (format: date) are NOT accepted — only 'datetime' qualifies.
+    """
     _NUMERIC = {"integer", "long", "number"}
-    _DATETIME = {"datetime", "date"}
+    _DATETIME = {"datetime"}  # 'date' excluded — AEP rejects format:date for version descriptor
     pk_set = set(primary_key)
 
     def is_eligible(attr: dict) -> bool:
