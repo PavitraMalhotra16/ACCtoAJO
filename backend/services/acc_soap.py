@@ -714,7 +714,7 @@ def parse_delivery_detail(xml_text: str) -> dict:
                     src_el = _find(text_el, "source")
                     text_raw = (src_el.text if src_el is not None else (text_el.text or "")).strip()
 
-    return {
+    result = {
         "id": delivery_el.get("id", ""),
         "internalName": delivery_el.get("internalName", ""),
         "label": delivery_el.get("label", delivery_el.get("_cs", "")),
@@ -728,6 +728,11 @@ def parse_delivery_detail(xml_text: str) -> dict:
         "smsRaw": sms_raw,
         "rawXml": ET.tostring(delivery_el, encoding="unicode"),
     }
+    log.info(
+        "parse_delivery_detail id=%s channel=%s html_len=%d sms_len=%d",
+        result["id"], channel, len(html_raw), len(sms_raw),
+    )
+    return result
 
 
 def parse_fault(xml_text: str) -> Optional[str]:

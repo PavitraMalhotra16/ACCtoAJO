@@ -337,34 +337,49 @@ async def template_analysis(
     if not login_id:
         raise HTTPException(401, "Not authenticated")
 
-    result = await db.execute(
+    parsed_result = await db.execute(
         select(AccTemplateParsed).where(AccTemplateParsed.login_id == login_id)
     )
     rows = [
-        r for r in result.scalars().all()
+        r for r in parsed_result.scalars().all()
         if json.loads(r.template_data or "{}").get("internalName") not in _EXCLUDED_INTERNAL_NAMES
     ]
 
-    re_recipient = re.compile(r"<%=\s*(recipient\.\w+)\s*%>")
-    re_target = re.compile(r"<%=\s*(targetData\.\w+)\s*%>")
+    # Also load raw XML rows keyed by source_id for fallback placeholder scanning
+    raw_result = await db.execute(
+        select(AccTemplateRaw).where(AccTemplateRaw.login_id == login_id)
+    )
+    raw_by_source: dict[str, str] = {
+        r.source_id: (r.raw_xml or "") for r in raw_result.scalars().all()
+    }
+
+    re_recipient = re.compile(r"<%=\s*(recipient\.[\w.]+)\s*%>")
+    re_target = re.compile(r"<%=\s*(targetData\.[\w.]+)\s*%>")
 
     unique_recipient: dict[str, str] = {}
     unique_target: dict[str, str] = {}
 
     for row in rows:
-        if not row.template_data:
-            continue
-        parsed = json.loads(row.template_data)
-        text = (parsed.get("htmlBody", "") or "") + " " + (parsed.get("smsContent", "") or "")
+        parsed = json.loads(row.template_data or "{}")
+        html_body = (parsed.get("htmlBody", "") or "")
+        sms_content = (parsed.get("smsContent", "") or "")
+        text = html_body + " " + sms_content
+
+        # Fallback: if parsed content fields are empty, scan the raw XML directly
+        if not text.strip():
+            text = raw_by_source.get(row.source_id, "")
+            log.info(
+                "analysis: parsed content empty for source_id=%s, falling back to raw XML (%d chars)",
+                row.source_id, len(text),
+            )
+
         for m in re_recipient.finditer(text):
             field = m.group(1)
             if field not in unique_recipient:
-                # Use config mapping if known; otherwise show raw field for user to edit
                 unique_recipient[field] = get_ajo_mapping(field) or field
         for m in re_target.finditer(text):
             field = m.group(1)
             if field not in unique_target:
-                # No config for targetData — show raw field, user decides the AJO path
                 unique_target[field] = field
 
     return {
