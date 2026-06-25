@@ -403,16 +403,9 @@ async def template_analysis(
         text = (
             (parsed.get("subject", "") or "") + " " +
             (parsed.get("htmlBody", "") or "") + " " +
-            (parsed.get("smsContent", "") or "")
+            (parsed.get("smsContent", "") or "") + " " +
+            raw_by_source.get(row.source_id, "")
         )
-
-        # Fallback: if parsed content fields are empty, scan the raw XML directly
-        if not text.strip():
-            text = raw_by_source.get(row.source_id, "")
-            log.info(
-                "analysis: parsed content empty for source_id=%s, falling back to raw XML (%d chars)",
-                row.source_id, len(text),
-            )
 
         for m in re_recipient.finditer(text):
             field = m.group(1)

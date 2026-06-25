@@ -126,20 +126,6 @@ async def ajo_connect(
     return {"success": True, "authenticated": True, "expires_in": expires_in}
 
 
-@router.get("/api/ajo/status")
-async def ajo_status(
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(
-        select(DestinationConnection).where(DestinationConnection.authenticated == True)
-    )
-    conn = result.scalar_one_or_none()
-    return {
-        "connected": conn is not None,
-        "org_id": conn.org_id if conn else None,
-        "sandbox_name": conn.sandbox_name if conn else None,
-    }
-
 
 @router.get("/api/connections/status")
 async def connections_status(
