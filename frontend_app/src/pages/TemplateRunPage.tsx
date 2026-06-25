@@ -186,14 +186,10 @@ export default function TemplateRunPage() {
       }
       const data: RunStatus = await res.json();
       setStatus(data);
-<<<<<<< HEAD
       if (data.status !== 'RUNNING') {
         stopPolling();
         fireNotification(data.email.failed + data.sms.failed);
       }
-=======
-      if (data.status !== 'RUNNING') stopPolling();
->>>>>>> dd78022dd8817b64d832013cc6025f840339690d
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Unknown error');
       stopPolling();
