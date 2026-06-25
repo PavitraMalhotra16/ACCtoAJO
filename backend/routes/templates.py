@@ -26,7 +26,7 @@ from db import (
     DestinationConnection, TemplateFolderConfig,
     TemplateMigrationRun, TemplateJobItem,
 )
-from core.security import get_login_from_cookie
+from core.security import get_login_from_cookie, get_valid_acc_token
 from pipeline.placeholder_config import RECIPIENT_MAPPINGS, get_ajo_mapping
 from pipeline.template_runner import run_template_migration
 from services.template_extractor import (
@@ -36,6 +36,37 @@ from services.template_extractor import (
     store_raw,
     store_parsed,
 )
+from template_pipeline_steps import TEMPLATE_PIPELINE_STEPS
+
+# Step order of BUILD_ENRICHED — a MANUAL (413) retry resumes from the step *after* this,
+# rebuilding the payload from the (manually reduced) enriched_json. Derived so it survives renumbering.
+_BUILD_ENRICHED_ORDER = next(
+    (s.order for s in TEMPLATE_PIPELINE_STEPS if s.name == "BUILD_ENRICHED"), 4
+)
+# A VERIFY-only resume (VERIFICATION_FAILED) skips PUSH, so the new row needs the AJO id
+# carried forward; otherwise VERIFY has nothing to GET.
+_PUSH_TEMPLATE_ORDER = next(
+    (s.order for s in TEMPLATE_PIPELINE_STEPS if s.name == "PUSH_TEMPLATE"), 7
+)
+
+# Prior terminal statuses we resume from (rather than restart at step 1).
+_RESUMABLE_STATUSES = ("FAILED", "VERIFICATION_FAILED", "MANUAL")
+
+
+def _resume_from_step(prev) -> int:
+    """Compute resume_from_step from a template's latest resumable attempt.
+
+    MANUAL (413 too large): resume from the step after BUILD_ENRICHED so the payload is
+        rebuilt from the manually-reduced enriched_json, then re-validated and re-pushed.
+    FAILED / VERIFICATION_FAILED: resume from the step before where it broke (re-runs the
+        failed step). VERIFICATION_FAILED broke at VERIFY, so only VERIFY re-runs — PUSH is
+        skipped, avoiding a duplicate.
+    """
+    if prev is None:
+        return 0
+    if prev.status == "MANUAL":
+        return _BUILD_ENRICHED_ORDER
+    return max(0, (prev.current_step_order or 1) - 1)
 
 log = logging.getLogger("acc_backend.templates")
 router = APIRouter()
@@ -387,33 +418,64 @@ async def template_migrate(
     if not templates:
         raise HTTPException(400, "No templates found in acc_deliverytemplate_parsed for this user")
 
-    # Find source_ids that already completed successfully in any prior run for this user —
-    # so we never push the same template twice.
+    # Find source_ids already pushed to AJO in a prior run — so we never push twice.
+    # "Already migrated" requires COMPLETED *and* a real ajo_template_id: a COMPLETED row
+    # without one never actually reached AJO (e.g. an old run that stopped at BUILD_ENRICHED).
     completed_result = await db.execute(
         select(TemplateJobItem.source_id)
         .join(TemplateMigrationRun, TemplateJobItem.run_id == TemplateMigrationRun.run_id)
         .where(
             TemplateMigrationRun.login_id == login_id,
             TemplateJobItem.status == "COMPLETED",
+            TemplateJobItem.ajo_template_id.isnot(None),
         )
     )
     already_done: set[str] = {row[0] for row in completed_result.all()}
 
-    # For failed templates, find the latest failed item per source_id so we can resume
-    # from the step before where it broke rather than restarting from step 1.
-    failed_result = await db.execute(
+    # Latest resumable attempt (FAILED / VERIFICATION_FAILED / MANUAL) per source_id, so we
+    # resume intelligently instead of restarting from step 1. (SKIPPED / HALTED start fresh.)
+    resumable_result = await db.execute(
         select(TemplateJobItem)
         .join(TemplateMigrationRun, TemplateJobItem.run_id == TemplateMigrationRun.run_id)
         .where(
             TemplateMigrationRun.login_id == login_id,
-            TemplateJobItem.status == "FAILED",
+            TemplateJobItem.status.in_(_RESUMABLE_STATUSES),
         )
         .order_by(TemplateJobItem.created_at.desc())
     )
-    last_failed: dict[str, TemplateJobItem] = {}
-    for fi in failed_result.scalars().all():
-        if fi.source_id not in last_failed:
-            last_failed[fi.source_id] = fi
+    last_resumable: dict[str, TemplateJobItem] = {}
+    for ri in resumable_result.scalars().all():
+        if ri.source_id not in last_resumable:
+            last_resumable[ri.source_id] = ri
+
+    # enriched_json lives per row. A resume that skips BUILD_ENRICHED (step 4) needs the
+    # enrichment carried forward onto the new row — so grab the latest non-null per source_id.
+    enriched_result = await db.execute(
+        select(TemplateJobItem.source_id, TemplateJobItem.enriched_json)
+        .join(TemplateMigrationRun, TemplateJobItem.run_id == TemplateMigrationRun.run_id)
+        .where(
+            TemplateMigrationRun.login_id == login_id,
+            TemplateJobItem.enriched_json.isnot(None),
+        )
+        .order_by(TemplateJobItem.created_at.desc())
+    )
+    latest_enriched: dict[str, str] = {}
+    for sid, ej in enriched_result.all():
+        latest_enriched.setdefault(sid, ej)
+
+    # Likewise the latest AJO id per source_id, for VERIFY-only resumes that skip PUSH.
+    ajo_id_result = await db.execute(
+        select(TemplateJobItem.source_id, TemplateJobItem.ajo_template_id)
+        .join(TemplateMigrationRun, TemplateJobItem.run_id == TemplateMigrationRun.run_id)
+        .where(
+            TemplateMigrationRun.login_id == login_id,
+            TemplateJobItem.ajo_template_id.isnot(None),
+        )
+        .order_by(TemplateJobItem.created_at.desc())
+    )
+    latest_ajo_id: dict[str, str] = {}
+    for sid, aid in ajo_id_result.all():
+        latest_ajo_id.setdefault(sid, aid)
 
     run_id = str(uuid.uuid4())
     run = TemplateMigrationRun(
@@ -441,8 +503,24 @@ async def template_migrate(
         if channel not in ("email", "sms"):
             continue
 
-        prev_failed = last_failed.get(tmpl.source_id)
-        resume_from_step = max(0, (prev_failed.current_step_order or 1) - 1) if prev_failed else 0
+        resume_from_step = _resume_from_step(last_resumable.get(tmpl.source_id))
+
+        # Each run makes a fresh row, so carry forward per-row state any skipped step would
+        # otherwise miss. If the needed state is unavailable, step back so it gets regenerated.
+        carry_enriched = None
+        carry_ajo_id = None
+        if resume_from_step >= _BUILD_ENRICHED_ORDER:
+            carry_enriched = latest_enriched.get(tmpl.source_id)
+            if carry_enriched is None:
+                resume_from_step = 0  # no enrichment to reuse → rebuild from step 1
+        if resume_from_step >= _PUSH_TEMPLATE_ORDER:
+            carry_ajo_id = latest_ajo_id.get(tmpl.source_id)
+            if carry_ajo_id is None:
+                # No AJO id to verify against → rebuild + re-push instead of VERIFY-only.
+                resume_from_step = _BUILD_ENRICHED_ORDER
+                carry_enriched = carry_enriched or latest_enriched.get(tmpl.source_id)
+                if carry_enriched is None:
+                    resume_from_step = 0
 
         job_item = TemplateJobItem(
             run_id=run_id,
@@ -450,6 +528,8 @@ async def template_migrate(
             internal_name=parsed.get("internalName"),
             channel=channel,
             status="PENDING",
+            enriched_json=carry_enriched,
+            ajo_template_id=carry_ajo_id,
         )
         db.add(job_item)
         await db.flush()
@@ -510,32 +590,47 @@ async def template_run_status(
     )
     rows = counts.all()
 
+    # Statuses that need human attention — surfaced in the failures table.
+    _REVIEW_STATUSES = ("FAILED", "MANUAL", "VERIFICATION_FAILED", "HALTED")
+
     def _tally(channel: str) -> dict:
-        total = completed = failed = 0
+        out = {"total": 0, "completed": 0, "failed": 0,
+               "skipped": 0, "manual": 0, "verification_failed": 0, "halted": 0}
         for r in rows:
-            if r.channel == channel:
-                total += r.cnt
-                if r.status == "COMPLETED":
-                    completed += r.cnt
-                elif r.status == "FAILED":
-                    failed += r.cnt
-        return {"total": total, "completed": completed, "failed": failed}
+            if r.channel != channel:
+                continue
+            out["total"] += r.cnt
+            if r.status == "COMPLETED":
+                out["completed"] += r.cnt
+            elif r.status == "FAILED":
+                out["failed"] += r.cnt
+            elif r.status == "SKIPPED":
+                out["skipped"] += r.cnt
+            elif r.status == "MANUAL":
+                out["manual"] += r.cnt
+            elif r.status == "VERIFICATION_FAILED":
+                out["verification_failed"] += r.cnt
+            elif r.status == "HALTED":
+                out["halted"] += r.cnt
+        return out
 
     failures = []
-    if run.status == "COMPLETED":
-        fail_result = await db.execute(
+    if run.status in ("COMPLETED", "HALTED"):
+        review_result = await db.execute(
             select(TemplateJobItem).where(
                 TemplateJobItem.run_id == run_id,
-                TemplateJobItem.status == "FAILED",
+                TemplateJobItem.status.in_(_REVIEW_STATUSES),
             )
         )
-        for fi in fail_result.scalars().all():
+        for fi in review_result.scalars().all():
             failures.append({
                 "source_id": fi.source_id,
                 "internal_name": fi.internal_name,
                 "channel": fi.channel,
+                "status": fi.status,
                 "error_step": fi.error_step,
                 "error_message": fi.error_message,
+                "ajo_template_id": fi.ajo_template_id,
             })
 
     return {

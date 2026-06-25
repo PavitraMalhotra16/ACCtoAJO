@@ -5,14 +5,20 @@ interface ChannelCounts {
   total: number;
   completed: number;
   failed: number;
+  skipped: number;
+  manual: number;
+  verification_failed: number;
+  halted: number;
 }
 
 interface FailureItem {
   source_id: string;
   internal_name: string | null;
   channel: string;
+  status: string;
   error_step: string | null;
   error_message: string | null;
+  ajo_template_id: string | null;
 }
 
 interface RunStatus {
@@ -96,21 +102,47 @@ export default function TemplateRunPage() {
 
   const emailTotal = status.email.total;
   const smsTotal = status.sms.total;
-  const overallTotal = emailTotal + smsTotal;
-  const overallCompleted = status.email.completed + status.sms.completed;
-  const overallFailed = status.email.failed + status.sms.failed;
-  const overallCounts: ChannelCounts = { total: overallTotal, completed: overallCompleted, failed: overallFailed };
+  const sum = (k: keyof ChannelCounts) => status.email[k] + status.sms[k];
+  const overallFailed = sum('failed');
+  const overallSkipped = sum('skipped');
+  const overallManual = sum('manual');
+  const overallVerifyFailed = sum('verification_failed');
+  const overallHalted = sum('halted');
+  const overallCounts: ChannelCounts = {
+    total: emailTotal + smsTotal,
+    completed: sum('completed'),
+    failed: overallFailed,
+    skipped: overallSkipped,
+    manual: overallManual,
+    verification_failed: overallVerifyFailed,
+    halted: overallHalted,
+  };
 
-  const isDone = status.status === 'COMPLETED';
+  const isHalted = status.status === 'HALTED';
+  const isDone = status.status === 'COMPLETED' || isHalted;
+  const badgeClass = isHalted
+    ? 'bg-amber-100 text-amber-700'
+    : isDone
+      ? 'bg-green-100 text-green-700'
+      : 'bg-blue-100 text-blue-700';
+  const badgeLabel = isHalted ? 'Halted' : isDone ? 'Completed' : 'Running…';
 
   return (
     <div className="max-w-2xl mx-auto p-8">
       <div className="flex items-center gap-3 mb-6">
         <h1 className="text-2xl font-bold">Template Migration</h1>
-        <span className={`text-xs font-semibold px-2 py-1 rounded-full ${isDone ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>
-          {isDone ? 'Completed' : 'Running…'}
+        <span className={`text-xs font-semibold px-2 py-1 rounded-full ${badgeClass}`}>
+          {badgeLabel}
         </span>
       </div>
+
+      {isHalted && (
+        <div className="mb-6 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-4">
+          Run halted by a config-level error (permissions <span className="font-mono">403</span> or
+          headers <span className="font-mono">406</span>). These affect every template — fix the AJO
+          product-profile permissions or connection, then re-run. Remaining templates were not pushed.
+        </div>
+      )}
 
       <div className="bg-white border border-gray-200 rounded-xl p-6 mb-6">
         {emailTotal > 0 && <ProgressBar label="Email templates" counts={status.email} />}
@@ -138,13 +170,34 @@ export default function TemplateRunPage() {
             </div>
           </div>
 
+          {(overallSkipped + overallManual + overallVerifyFailed + overallHalted) > 0 && (
+            <div className="grid grid-cols-4 gap-3 text-center mb-4 text-xs">
+              <div>
+                <div className="text-lg font-semibold text-gray-600">{overallSkipped}</div>
+                <div className="text-gray-400">Skipped</div>
+              </div>
+              <div>
+                <div className="text-lg font-semibold text-orange-500">{overallManual}</div>
+                <div className="text-gray-400">Manual (413)</div>
+              </div>
+              <div>
+                <div className="text-lg font-semibold text-amber-600">{overallVerifyFailed}</div>
+                <div className="text-gray-400">Verify failed</div>
+              </div>
+              <div>
+                <div className="text-lg font-semibold text-amber-700">{overallHalted}</div>
+                <div className="text-gray-400">Halted</div>
+              </div>
+            </div>
+          )}
+
           {status.failures.length > 0 && (
             <div>
               <button
                 onClick={() => setShowFailures(f => !f)}
                 className="text-sm text-red-600 hover:underline font-medium"
               >
-                {showFailures ? 'Hide' : 'Show'} failed templates ({status.failures.length})
+                {showFailures ? 'Hide' : 'Show'} templates needing review ({status.failures.length})
               </button>
               {showFailures && (
                 <table className="w-full text-xs mt-3 border border-gray-200 rounded-lg overflow-hidden">
@@ -152,6 +205,7 @@ export default function TemplateRunPage() {
                     <tr>
                       <th className="text-left px-3 py-2 font-medium text-gray-600">Internal name</th>
                       <th className="text-left px-3 py-2 font-medium text-gray-600">Channel</th>
+                      <th className="text-left px-3 py-2 font-medium text-gray-600">Status</th>
                       <th className="text-left px-3 py-2 font-medium text-gray-600">Failed at</th>
                       <th className="text-left px-3 py-2 font-medium text-gray-600">Error</th>
                     </tr>
@@ -161,6 +215,7 @@ export default function TemplateRunPage() {
                       <tr key={i} className="border-t border-gray-100">
                         <td className="px-3 py-2 font-mono">{f.internal_name ?? f.source_id}</td>
                         <td className="px-3 py-2">{f.channel}</td>
+                        <td className="px-3 py-2">{f.status}</td>
                         <td className="px-3 py-2">{f.error_step ?? '—'}</td>
                         <td className="px-3 py-2 text-red-600">{f.error_message ?? '—'}</td>
                       </tr>
