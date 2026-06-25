@@ -155,10 +155,10 @@ async def extract_templates(
                 skipped += 1
                 continue
 
-            # Step 1: store raw only if not already extracted
-            if tid not in already_in_raw:
-                detail = await fetch_delivery_detail(
-                    soap_url, soap_token, conn.security_token or "", tid, auth_headers=auth_hdrs
+            existing = await db.execute(
+                select(AccTemplateParsed).where(
+                    AccTemplateParsed.login_id == login_id,
+                    AccTemplateParsed.source_id == meta["id"],
                 )
             )
             if existing.scalars().first() is not None:
