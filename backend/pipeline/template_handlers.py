@@ -380,11 +380,11 @@ def _build_ajo_payload(enriched: dict, channel: str) -> dict:
         # rejects it for templateType html ("subType is only supported with ... code channel").
         # §4.3 says it is optional with no functional effect for email, so we leave it off.
         base["templateType"] = "html"
-        base["template"] = {"html": enriched.get("convertedHtml") or "", "editorContext": {}}
+        base["template"] = {"html": enriched.get("convertedHtml") or ""}
     elif channel == "sms":
         # SMS uses templateType "content" ("text" is not valid) (§10).
         base["templateType"] = "content"
-        base["template"] = {"body": enriched.get("convertedSmsBody") or "", "editorContext": {}}
+        base["template"] = {"body": enriched.get("convertedSmsBody") or ""}
     else:
         raise TemplateSkipped(f"unsupported channel {channel!r} — must be email or sms")
     return base
