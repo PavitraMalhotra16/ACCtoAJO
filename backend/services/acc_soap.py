@@ -663,56 +663,59 @@ def parse_delivery_detail(xml_text: str) -> dict:
             if subj_el is not None:
                 subject_raw = (subj_el.text or "").strip()
 
-    # NodeValue aliases for channel content
-    sms_alias = _find(delivery_el, "smsText")
-    html_alias = _find(delivery_el, "htmlText")
-    text_alias = _find(delivery_el, "textText")
+    sms_raw = ""
+    html_raw = ""
+    text_raw = ""
 
-    sms_raw = (sms_alias.text or "").strip() if sms_alias is not None else ""
-    html_raw = (html_alias.text or "").strip() if html_alias is not None else ""
-    text_raw = (text_alias.text or "").strip() if text_alias is not None else ""
+    # Priority 1: direct child <content> element — no size limit, always complete
+    content_el = _find(delivery_el, "content")
+    if content_el is not None:
+        html_el = _find(content_el, "html")
+        if html_el is not None:
+            src_el = _find(html_el, "source")
+            html_raw = (src_el.text or "").strip() if src_el is not None else ""
+        sms_el = _find(content_el, "sms")
+        if sms_el is not None:
+            sms_src = _find(sms_el, "source")
+            sms_raw = (sms_src.text or "").strip() if sms_src is not None else ""
+        text_el = _find(content_el, "text") or _find(content_el, "textContent")
+        if text_el is not None:
+            src_el = _find(text_el, "source")
+            text_raw = (src_el.text if src_el is not None else (text_el.text or "")).strip()
 
-    # Fallback: parse the 'data' XML blob for full content
-    data_el = _find(delivery_el, "data")
-    if data_el is not None and data_el.text:
-        try:
-            inner = ET.fromstring(data_el.text)
-            content_el = inner.find("content")
-            if content_el is not None:
-                if not sms_raw:
-                    sms_src = content_el.find("sms/source")
-                    sms_raw = (sms_src.text or "").strip() if sms_src is not None else ""
-                if not html_raw:
-                    html_src = content_el.find("html/source")
-                    html_raw = (html_src.text or "").strip() if html_src is not None else ""
-                if not text_raw:
-                    text_src = content_el.find("text/source")
-                    text_raw = (text_src.text or "").strip() if text_src is not None else ""
-                if not subject_raw:
-                    subj = inner.find("mailParameters/subject")
-                    subject_raw = (subj.text or "").strip() if subj is not None else ""
-        except ET.ParseError:
-            pass
+    # Priority 2: 'data' XML blob (delivery fetched via queryDef, content nested inside data attr)
+    if not html_raw and not sms_raw:
+        data_el = _find(delivery_el, "data")
+        if data_el is not None and data_el.text:
+            try:
+                inner = ET.fromstring(data_el.text)
+                inner_content = inner.find("content")
+                if inner_content is not None:
+                    if not sms_raw:
+                        sms_src = inner_content.find("sms/source")
+                        sms_raw = (sms_src.text or "").strip() if sms_src is not None else ""
+                    if not html_raw:
+                        html_src = inner_content.find("html/source")
+                        html_raw = (html_src.text or "").strip() if html_src is not None else ""
+                    if not text_raw:
+                        text_src = inner_content.find("text/source")
+                        text_raw = (text_src.text or "").strip() if text_src is not None else ""
+                    if not subject_raw:
+                        subj = inner.find("mailParameters/subject")
+                        subject_raw = (subj.text or "").strip() if subj is not None else ""
+            except ET.ParseError:
+                pass
 
-    # Final fallback: expanded child nodes
-    if not html_raw or not sms_raw:
-        content_el = _find(delivery_el, "content")
-        if content_el is not None:
-            if not sms_raw:
-                sms_el = _find(content_el, "sms")
-                if sms_el is not None:
-                    sms_src = _find(sms_el, "source")
-                    sms_raw = (sms_src.text or "").strip() if sms_src is not None else ""
-            if not html_raw:
-                html_el = _find(content_el, "html")
-                if html_el is not None:
-                    src_el = _find(html_el, "source")
-                    html_raw = (src_el.text or "").strip() if src_el is not None else ""
-            if not text_raw:
-                text_el = _find(content_el, "text") or _find(content_el, "textContent")
-                if text_el is not None:
-                    src_el = _find(text_el, "source")
-                    text_raw = (src_el.text if src_el is not None else (text_el.text or "")).strip()
+    # Priority 3: NodeValue aliases — truncated by ACC at ~4000 chars, last resort only
+    if not html_raw:
+        html_alias = _find(delivery_el, "htmlText")
+        html_raw = (html_alias.text or "").strip() if html_alias is not None else ""
+    if not sms_raw:
+        sms_alias = _find(delivery_el, "smsText")
+        sms_raw = (sms_alias.text or "").strip() if sms_alias is not None else ""
+    if not text_raw:
+        text_alias = _find(delivery_el, "textText")
+        text_raw = (text_alias.text or "").strip() if text_alias is not None else ""
 
     result = {
         "id": delivery_el.get("id", ""),
