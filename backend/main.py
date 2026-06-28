@@ -17,6 +17,7 @@ from routes.schemas import router as schemas_router
 from routes.conversion import router as conversion_router
 from routes.migrate import router as migrate_router
 from routes.templates import router as templates_router
+from routes.workflows import router as workflows_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("acc_backend")
@@ -69,6 +70,7 @@ app.include_router(schemas_router)
 app.include_router(conversion_router)
 app.include_router(migrate_router)
 app.include_router(templates_router)
+app.include_router(workflows_router)
 
 
 @app.exception_handler(Exception)

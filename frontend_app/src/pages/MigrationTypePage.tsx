@@ -11,7 +11,7 @@ export default function MigrationTypePage() {
           <p className="mt-2 text-gray-500">Choose the type of migration to proceed</p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           {/* Schema card */}
           <button
             onClick={() => navigate('/migration/select')}
@@ -27,6 +27,28 @@ export default function MigrationTypePage() {
               <p className="mt-1 text-sm text-gray-500">Migrate relational schemas from ACC into AEP / AJO</p>
             </div>
             <span className="mt-auto inline-flex items-center gap-1 text-sm font-medium text-blue-600 group-hover:gap-2 transition-all">
+              Continue
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
+              </svg>
+            </span>
+          </button>
+
+          {/* Workflow card */}
+          <button
+            onClick={() => navigate('/migration/workflow')}
+            className="group flex flex-col items-start gap-4 rounded-xl border-2 border-gray-200 hover:border-violet-500 bg-white p-6 text-left transition-all hover:shadow-md focus:outline-none focus:ring-2 focus:ring-violet-500"
+          >
+            <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-violet-50 group-hover:bg-violet-100 transition-colors">
+              <svg className="h-6 w-6 text-violet-600" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M7 16V4m0 0L3 8m4-4l4 4M17 8v12m0 0l4-4m-4 4l-4-4" />
+              </svg>
+            </div>
+            <div>
+              <p className="text-lg font-semibold text-gray-900 group-hover:text-violet-700 transition-colors">Workflow</p>
+              <p className="mt-1 text-sm text-gray-500">Extract and review ACC workflows — activities, transitions, and config</p>
+            </div>
+            <span className="mt-auto inline-flex items-center gap-1 text-sm font-medium text-violet-600 group-hover:gap-2 transition-all">
               Continue
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
