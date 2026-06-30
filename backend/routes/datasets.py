@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db import DestinationConnection, SchemaJobItem, get_db
 from pipeline import batch_client
 from pipeline.handlers import get_valid_access_token
-from core.security import decrypt
 
 log = logging.getLogger("acc_backend.datasets")
 
@@ -130,19 +129,11 @@ async def ingest_dataset(
     except ValueError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
 
-    # Resolve client_id from stored credentials
-    client_id = ""
-    if dest.encrypted_credentials:
-        try:
-            client_id = decrypt(dest.encrypted_credentials).split(":", 1)[0]
-        except Exception:
-            pass
-
     headers = {
         "Authorization": f"Bearer {token}",
-        "x-api-key": client_id,
-        "x-gw-ims-org-id": dest.org_id,
-        "x-sandbox-name": dest.sandbox_name or "prod",
+        "x-api-key": (dest.client_id or "").strip(),
+        "x-gw-ims-org-id": dest.org_id.strip(),
+        "x-sandbox-name": (dest.sandbox_name or "prod").strip(),
     }
 
     steps: list[dict] = []
