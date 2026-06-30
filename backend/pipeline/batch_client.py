@@ -76,4 +76,4 @@ async def complete_batch(
         params={"action": "COMPLETE"},
     )
     _raise_for(resp, "Complete batch")
-    return resp.json()
+    return resp.json() if resp.content else {"id": batch_id, "status": "active"}
