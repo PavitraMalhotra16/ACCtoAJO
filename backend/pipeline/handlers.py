@@ -1447,7 +1447,7 @@ async def validate_oc(ctx: dict, data: dict) -> dict:
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             result = await aep_client.validate_oc_extension(client, headers, dataset_id)
-        supported = bool(result.get("supported", False))
+        supported = bool(result.get("extensionSupported", False))
         reason = result.get("reason") or result.get("message") or ""
         data["ocSupported"] = supported
         data["ocNotSupportedReason"] = reason if not supported else None
@@ -1476,7 +1476,9 @@ async def enable_oc(ctx: dict, data: dict) -> dict:
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             result = await aep_client.enable_oc_extension(client, headers, dataset_id)
-        job_id = result.get("jobId") or result.get("id") or ""
+        # Response is a list: [{"jobId": "...", "datasetId": "...", ...}]
+        first = result[0] if isinstance(result, list) and result else (result if isinstance(result, dict) else {})
+        job_id = first.get("jobId") or first.get("id") or ""
         if not job_id:
             log.warning("ENABLE_OC: enablement API returned no job ID for %s", ctx.get("schema_name"))
             return data

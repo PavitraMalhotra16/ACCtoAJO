@@ -221,7 +221,7 @@ async def enable_oc_extension(client: httpx.AsyncClient, headers: dict, dataset_
     resp = await client.post(
         f"{OC_MODELER_BASE}/datasets/extensions/enablement",
         headers=headers,
-        json={"datasetId": dataset_id},
+        json={"datasetIds": [dataset_id]},
     )
     _raise_for(resp, "Enable OC extension")
     return resp.json()
