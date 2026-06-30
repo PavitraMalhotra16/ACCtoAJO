@@ -207,11 +207,19 @@ async def create_identity_namespace(client: httpx.AsyncClient, headers: dict, bo
 
 # ── Orchestrated Campaigns (OC) Modeler ─────────────────────────────────────
 async def validate_oc_extension(client: httpx.AsyncClient, headers: dict, dataset_id: str) -> dict:
-    """GET /modeler/datasets/{id}/extensions/validation — check OC eligibility."""
+    """GET /modeler/datasets/{id}/extensions/validation — check OC eligibility.
+
+    Returns the parsed JSON body for both 200 and 400 responses, with a synthetic
+    ``_httpStatus`` key added.  The handler interprets 400s (e.g. "already enabled"
+    vs. genuine ineligibility).  Any other non-2xx raises.
+    """
     resp = await client.get(
         f"{OC_MODELER_BASE}/datasets/{dataset_id}/extensions/validation",
         headers=headers,
     )
+    if resp.status_code == 400:
+        body = resp.json() if resp.content else {}
+        return {"_httpStatus": 400, **body}
     _raise_for(resp, "Validate OC extension")
     return resp.json()
 

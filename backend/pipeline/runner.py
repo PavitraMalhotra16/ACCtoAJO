@@ -183,6 +183,8 @@ async def run_schema_phase2(
     oc_status: str | None = None
     if oc_supported is False:
         oc_status = "NOT_ELIGIBLE"
+    elif data.get("ocAlreadyEnabled"):
+        oc_status = "ENABLED"
     elif oc_job_id:
         oc_status = "PENDING"
         # Spawn background poller — detached, pipeline doesn't wait.

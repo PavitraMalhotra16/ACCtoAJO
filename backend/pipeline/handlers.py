@@ -1447,11 +1447,26 @@ async def validate_oc(ctx: dict, data: dict) -> dict:
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             result = await aep_client.validate_oc_extension(client, headers, dataset_id)
-        supported = bool(result.get("extensionSupported", False))
-        reason = result.get("reason") or result.get("message") or ""
-        data["ocSupported"] = supported
-        data["ocNotSupportedReason"] = reason if not supported else None
-        log.info("OC validation for %s: supported=%s reason=%r", ctx.get("schema_name"), supported, reason)
+
+        if result.get("_httpStatus") == 400:
+            error_code = result.get("errorCode", "")
+            error_msg = result.get("errorMessage", "")
+            if error_code == "CJMDMS-100169-400":
+                # OC extension is already enabled on this dataset — treat as ENABLED
+                data["ocSupported"] = True
+                data["ocAlreadyEnabled"] = True
+                log.info("OC validation for %s: already enabled (CJMDMS-100169-400)", ctx.get("schema_name"))
+            else:
+                # Genuine ineligibility (e.g. time-series schema, missing primary key)
+                data["ocSupported"] = False
+                data["ocNotSupportedReason"] = error_msg or f"Not eligible ({error_code})"
+                log.info("OC validation for %s: not eligible — %s: %s", ctx.get("schema_name"), error_code, error_msg)
+        else:
+            supported = bool(result.get("extensionSupported", False))
+            reason = result.get("reason") or result.get("message") or ""
+            data["ocSupported"] = supported
+            data["ocNotSupportedReason"] = reason if not supported else None
+            log.info("OC validation for %s: supported=%s reason=%r", ctx.get("schema_name"), supported, reason)
     except Exception as exc:
         log.warning("VALIDATE_OC: API call failed for %s (%s) — treating as not eligible", ctx.get("schema_name"), exc)
         data["ocSupported"] = False
@@ -1464,6 +1479,9 @@ async def enable_oc(ctx: dict, data: dict) -> dict:
     """Fire OC enablement job; spawn background poller to track result."""
     if not data.get("ocSupported"):
         log.info("OC enablement skipped for %s (not eligible)", ctx.get("schema_name"))
+        return data
+    if data.get("ocAlreadyEnabled"):
+        log.info("OC enablement skipped for %s (already enabled)", ctx.get("schema_name"))
         return data
 
     dataset_id = data.get("aepDatasetId")
