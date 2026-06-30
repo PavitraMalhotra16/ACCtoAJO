@@ -204,7 +204,7 @@ async def run_schema_phase2(
         fields_added=data.get("fieldsChanged", 0) if final_step == "UPDATED" else None,
         oc_supported=oc_supported,
         oc_not_supported_reason=oc_reason,
-        oc_job_id=oc_job_id if oc_job_id else None,
+        oc_job_id=oc_job_id or None,
         oc_status=oc_status,
     )
     log.info("Schema %s push complete (%s) oc_status=%s", ctx.get("schema_name"), final_step, oc_status)

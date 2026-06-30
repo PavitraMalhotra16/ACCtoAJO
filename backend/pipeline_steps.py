@@ -16,7 +16,7 @@ class PipelineStep:
 # Phase 3 (AJOpart) steps 6-14 push the relational schema into AEP / AJO:
 #   PASS 1 (per schema)  : NORMALIZE_INPUT → DUPLICATE_CHECK → CREATE_SCHEMA →
 #                          PRIMARY_KEY/VERSION/TIMESTAMP/IDENTITY descriptors
-#   PASS 2 (after all)   : RELATIONSHIP_DESCRIPTORS → VERIFY
+#   PASS 2 (after all)   : RELATIONSHIP_DESCRIPTORS → CREATE_DATASET → VERIFY → VALIDATE_OC → ENABLE_OC
 PIPELINE_STEPS: list[PipelineStep] = [
     PipelineStep(
         name="LOAD_JSON",

@@ -1444,14 +1444,18 @@ async def validate_oc(ctx: dict, data: dict) -> dict:
 
     auth = await _resolve_aep_auth(ctx)
     headers = _headers(auth, content_type=False)
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        result = await aep_client.validate_oc_extension(client, headers, dataset_id)
-
-    supported = bool(result.get("supported", False))
-    reason = result.get("reason") or result.get("message") or ""
-    data["ocSupported"] = supported
-    data["ocNotSupportedReason"] = reason if not supported else None
-    log.info("OC validation for %s: supported=%s reason=%r", ctx.get("schema_name"), supported, reason)
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            result = await aep_client.validate_oc_extension(client, headers, dataset_id)
+        supported = bool(result.get("supported", False))
+        reason = result.get("reason") or result.get("message") or ""
+        data["ocSupported"] = supported
+        data["ocNotSupportedReason"] = reason if not supported else None
+        log.info("OC validation for %s: supported=%s reason=%r", ctx.get("schema_name"), supported, reason)
+    except Exception as exc:
+        log.warning("VALIDATE_OC: API call failed for %s (%s) — treating as not eligible", ctx.get("schema_name"), exc)
+        data["ocSupported"] = False
+        data["ocNotSupportedReason"] = "OC validation API unavailable"
     return data
 
 
@@ -1469,15 +1473,17 @@ async def enable_oc(ctx: dict, data: dict) -> dict:
 
     auth = await _resolve_aep_auth(ctx)
     headers = _headers(auth)
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        result = await aep_client.enable_oc_extension(client, headers, dataset_id)
-
-    job_id = result.get("jobId") or result.get("id") or ""
-    if not job_id:
-        log.warning("ENABLE_OC: enablement API returned no job ID for %s", ctx.get("schema_name"))
-        return data
-    data["ocJobId"] = job_id
-    log.info("OC enablement job %s fired for %s", job_id, ctx.get("schema_name"))
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            result = await aep_client.enable_oc_extension(client, headers, dataset_id)
+        job_id = result.get("jobId") or result.get("id") or ""
+        if not job_id:
+            log.warning("ENABLE_OC: enablement API returned no job ID for %s", ctx.get("schema_name"))
+            return data
+        data["ocJobId"] = job_id
+        log.info("OC enablement job %s fired for %s", job_id, ctx.get("schema_name"))
+    except Exception as exc:
+        log.warning("ENABLE_OC: API call failed for %s (%s) — OC enablement skipped", ctx.get("schema_name"), exc)
     return data
 
 
