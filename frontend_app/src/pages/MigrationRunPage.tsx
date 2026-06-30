@@ -12,7 +12,7 @@ import {
   type MigrationSchemaItem,
 } from '../api/migration'
 
-// Labels must match pipeline_steps.py — steps 1-5 enrich, 6-14 push to AJO
+// Labels must match pipeline_steps.py — steps 1-5 enrich, 6-15 push to AJO
 const STEP_LABELS: Record<string, string> = {
   LOAD_JSON: 'Loading schema',
   MAP_TYPES: 'Mapping types',
@@ -27,9 +27,12 @@ const STEP_LABELS: Record<string, string> = {
   TIMESTAMP_DESCRIPTOR: 'Timestamp descriptor',
   IDENTITY_DESCRIPTOR: 'Identity descriptor',
   RELATIONSHIP_DESCRIPTORS: 'Wiring relationships',
+  CREATE_DATASET: 'Creating dataset in AEP',
   VERIFY: 'Verifying in AEP',
+  VALIDATE_OC: 'Checking OC eligibility',
+  ENABLE_OC: 'Enabling for Orchestrated Campaigns',
 }
-const TOTAL_STEPS = 14
+const TOTAL_STEPS = 17
 
 type Phase = 'extracting' | 'migrating' | 'done'
 
@@ -107,7 +110,9 @@ function CompletedCard({ s }: { s: MigrationSchemaItem }) {
   const badgeLabel = alreadyExisted
     ? 'Already in AJO — nothing to push'
     : wasUpdated
-    ? `Updated in AJO — ${fieldsAdded} attribute${fieldsAdded !== 1 ? 's' : ''} added`
+    ? fieldsAdded > 0
+      ? `Updated in AJO — ${fieldsAdded} attribute${fieldsAdded !== 1 ? 's' : ''} changed`
+      : 'Updated in AJO'
     : 'Pushed to AJO'
 
   return (
@@ -137,6 +142,45 @@ function CompletedCard({ s }: { s: MigrationSchemaItem }) {
             </li>
           ))}
         </ul>
+      )}
+      {s.oc_status && (
+        <div className="mt-3 pt-3 border-t border-gray-100">
+          {s.oc_status === 'ENABLED' && (
+            <div className="flex items-center gap-2 text-xs text-green-700">
+              <span className="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
+              <span className="font-medium">Enabled for Orchestrated Campaigns</span>
+              {s.oc_job_id && (
+                <span className="text-gray-400 font-mono ml-auto">job: {s.oc_job_id.slice(0, 8)}</span>
+              )}
+            </div>
+          )}
+          {s.oc_status === 'PENDING' && (
+            <div className="flex items-center gap-2 text-xs text-blue-600">
+              <svg className="w-3 h-3 animate-spin shrink-0" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+              </svg>
+              <span>Enabling for Orchestrated Campaigns — may take up to 30s</span>
+            </div>
+          )}
+          {s.oc_status === 'NOT_ELIGIBLE' && (
+            <div className="flex flex-col gap-0.5 text-xs text-amber-700">
+              <div className="flex items-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
+                <span className="font-medium">Not eligible for Orchestrated Campaigns</span>
+              </div>
+              {s.oc_not_supported_reason && (
+                <p className="pl-3.5 text-amber-600">{s.oc_not_supported_reason}</p>
+              )}
+            </div>
+          )}
+          {s.oc_status === 'FAILED' && (
+            <div className="flex items-center gap-2 text-xs text-red-600">
+              <span className="w-1.5 h-1.5 rounded-full bg-red-400 shrink-0" />
+              <span>OC enablement failed — check logs for details</span>
+            </div>
+          )}
+        </div>
       )}
     </div>
   )
