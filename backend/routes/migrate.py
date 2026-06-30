@@ -53,7 +53,10 @@ async def migrate_start(
         raise HTTPException(401, "Not authenticated")
 
     dest_result = await db.execute(
-        select(DestinationConnection).where(DestinationConnection.authenticated == True)
+        select(DestinationConnection)
+        .where(DestinationConnection.authenticated == True)
+        .order_by(DestinationConnection.last_authenticated_at.desc())
+        .limit(1)
     )
     dest = dest_result.scalar_one_or_none()
     if not dest:
@@ -200,6 +203,10 @@ async def migrate_status(
                 "error_message": i.error_message,
                 "warnings": _warnings_of(i),
                 "fields_added": i.fields_added or 0,
+                "oc_supported": i.oc_supported,
+                "oc_not_supported_reason": i.oc_not_supported_reason,
+                "oc_job_id": i.oc_job_id,
+                "oc_status": i.oc_status,
                 "created_at": i.created_at.isoformat(),
                 "completed_at": i.completed_at.isoformat() if i.completed_at else None,
             }

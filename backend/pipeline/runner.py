@@ -33,6 +33,11 @@ async def _update_item(
     identity_is_primary: bool | None = None,
     current_snapshot: str | None = None,
     fields_added: int | None = None,
+    aep_dataset_id: str | None = None,
+    oc_supported: bool | None = None,
+    oc_not_supported_reason: str | None = None,
+    oc_job_id: str | None = None,
+    oc_status: str | None = None,
 ) -> None:
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -51,6 +56,16 @@ async def _update_item(
             item.current_snapshot = current_snapshot
         if fields_added is not None:
             item.fields_added = fields_added
+        if aep_dataset_id is not None:
+            item.aep_dataset_id = aep_dataset_id
+        if oc_supported is not None:
+            item.oc_supported = oc_supported
+        if oc_not_supported_reason is not None:
+            item.oc_not_supported_reason = oc_not_supported_reason
+        if oc_job_id is not None:
+            item.oc_job_id = oc_job_id
+        if oc_status is not None:
+            item.oc_status = oc_status
         if status == "COMPLETED":
             item.completed_at = datetime.now(timezone.utc)
         await db.commit()
@@ -75,9 +90,11 @@ async def _run_steps(
 ) -> tuple[bool, dict]:
     """Run a contiguous set of pipeline steps. Returns (ok, data); on failure the
     item is marked FAILED and ok=False."""
-    # Steps that are skipped when the schema already exists in AEP
-    _SKIP_IF_EXISTS = {"CREATE_SCHEMA", "PRIMARY_KEY_DESCRIPTOR", "VERSION_DESCRIPTOR",
-                       "TIMESTAMP_DESCRIPTOR", "IDENTITY_DESCRIPTOR"}
+    # Steps that are skipped when the schema already exists in AEP.
+    # All descriptor steps are idempotent (_create_descriptor no-ops if already present),
+    # so we never skip them — an existing schema may be missing a descriptor (e.g. after
+    # a partial previous run or the synthetic _recordVersion field was added).
+    _SKIP_IF_EXISTS: set[str] = set()
 
     for step in steps:
         if step.order <= resume_from_step:
@@ -114,6 +131,12 @@ async def _run_steps(
         if step.name == "BUILD_PAYLOAD":
             await _write_enriched_json(ctx["converted_schema_id"], data.get("ajoPayload", data))
 
+        if step.name == "CREATE_DATASET" and data.get("aepDatasetId"):
+            await _update_item(
+                item_id, "RUNNING", step.name, step.order,
+                aep_dataset_id=data["aepDatasetId"],
+            )
+
     return True, data
 
 
@@ -148,28 +171,45 @@ async def run_schema_phase2(
     data: dict,
     resume_from_step: int = 0,
 ) -> None:
-    """PASS 2 — wire relationships, verify, then mark the schema's final state."""
-    if data.get("skipToVerify"):
-        # Schema already existed and all steps were skipped — mark immediately.
-        await _update_item(item_id, "COMPLETED", "ALREADY_EXISTS", _TOTAL_STEPS)
-        log.info("Schema %s push complete (ALREADY_EXISTS — fast path)", ctx.get("schema_name"))
-        return
-
+    """PASS 2 — wire relationships, create dataset, verify, OC, then mark final state."""
     ok, data = await _run_steps(item_id, ctx, _PHASE2_STEPS, data, resume_from_step)
     if not ok:
         return
 
-    prop_changes = data.get("changesMade", 0)
-    any_changes = prop_changes + data.get("relationshipsCreated", 0)
+    # Persist OC fields regardless of whether OC steps succeeded (OC failure ≠ push failure).
+    oc_supported = data.get("ocSupported")
+    oc_reason = data.get("ocNotSupportedReason")
+    oc_job_id = data.get("ocJobId")
+    oc_status: str | None = None
+    if oc_supported is False:
+        oc_status = "NOT_ELIGIBLE"
+    elif data.get("ocAlreadyEnabled"):
+        oc_status = "ENABLED"
+    elif oc_job_id:
+        oc_status = "PENDING"
+        # Spawn background poller — detached, pipeline doesn't wait.
+        from pipeline.handlers import _poll_oc_job  # local import to avoid circular at module load
+        asyncio.create_task(_poll_oc_job(oc_job_id, item_id, ctx))
+
+    field_changes = data.get("changesMade", 0)
+    rel_changes = data.get("relationshipsCreated", 0)
+    dataset_created = data.get("datasetCreated", False)
+    any_changes = field_changes + rel_changes + (1 if dataset_created else 0)
     if data.get("schemaExisted") and any_changes == 0:
         final_step = "ALREADY_EXISTS"
     elif data.get("schemaExisted") and any_changes > 0:
         final_step = "UPDATED"
     else:
         final_step = "COMPLETED"
-    await _update_item(item_id, "COMPLETED", final_step, _TOTAL_STEPS,
-                       fields_added=prop_changes if final_step == "UPDATED" else None)
-    log.info("Schema %s push complete (%s)", ctx.get("schema_name"), final_step)
+    await _update_item(
+        item_id, "COMPLETED", final_step, _TOTAL_STEPS,
+        fields_added=data.get("fieldsChanged", 0) if final_step == "UPDATED" else None,
+        oc_supported=oc_supported,
+        oc_not_supported_reason=oc_reason,
+        oc_job_id=oc_job_id or None,
+        oc_status=oc_status,
+    )
+    log.info("Schema %s push complete (%s) oc_status=%s", ctx.get("schema_name"), final_step, oc_status)
 
 
 async def run_migration_job(
