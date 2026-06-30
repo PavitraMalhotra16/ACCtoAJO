@@ -5,13 +5,13 @@ export default function MigrationTypePage() {
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center px-4 py-12">
-      <div className="w-full max-w-2xl flex flex-col gap-8">
+      <div className="w-full max-w-4xl flex flex-col gap-8">
         <div className="text-center">
           <h1 className="text-3xl font-bold text-gray-900">What would you like to migrate?</h1>
           <p className="mt-2 text-gray-500">Choose the type of migration to proceed</p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           {/* Schema card */}
           <button
             onClick={() => navigate('/migration/select')}
@@ -49,6 +49,27 @@ export default function MigrationTypePage() {
               <p className="mt-1 text-sm text-gray-500">Migrate delivery templates and campaign assets from ACC</p>
             </div>
             <span className="mt-auto inline-flex items-center gap-1 text-sm font-medium text-purple-600 group-hover:gap-2 transition-all">
+              Continue
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
+              </svg>
+            </span>
+          </button>
+          {/* Dataset card */}
+          <button
+            onClick={() => navigate('/dataset/ingest')}
+            className="group flex flex-col items-start gap-4 rounded-xl border-2 border-gray-200 hover:border-green-500 bg-white p-6 text-left transition-all hover:shadow-md focus:outline-none focus:ring-2 focus:ring-green-500"
+          >
+            <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-green-50 group-hover:bg-green-100 transition-colors">
+              <svg className="h-6 w-6 text-green-600" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" />
+              </svg>
+            </div>
+            <div>
+              <p className="text-lg font-semibold text-gray-900 group-hover:text-green-700 transition-colors">Dataset</p>
+              <p className="mt-1 text-sm text-gray-500">Upload a CSV, JSON, or Parquet file into a migrated AEP dataset</p>
+            </div>
+            <span className="mt-auto inline-flex items-center gap-1 text-sm font-medium text-green-600 group-hover:gap-2 transition-all">
               Continue
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />

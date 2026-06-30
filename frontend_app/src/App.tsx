@@ -5,6 +5,7 @@ import MigrationTypePage from './pages/MigrationTypePage'
 import MigrationSelectPage from './pages/MigrationSelectPage'
 import MigrationRunPage from './pages/MigrationRunPage'
 import TemplateMigrationPage from './pages/TemplateMigrationPage'
+import DatasetIngestPage from './pages/DatasetIngestPage'
 import { useConfigStore } from './store/configStore'
 
 const TemplateAnalysisPage = React.lazy(() => import('./pages/TemplateAnalysisPage'))
@@ -52,6 +53,11 @@ export default function App() {
             <Suspense fallback={<div>Loading...</div>}>
               <TemplateRunPage />
             </Suspense>
+          </ProtectedRoute>
+        } />
+        <Route path="/dataset/ingest" element={
+          <ProtectedRoute condition={accConnected && ajoConnected}>
+            <DatasetIngestPage />
           </ProtectedRoute>
         } />
         <Route path="*" element={<Navigate to="/" replace />} />
