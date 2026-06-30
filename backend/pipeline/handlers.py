@@ -1473,6 +1473,9 @@ async def enable_oc(ctx: dict, data: dict) -> dict:
         result = await aep_client.enable_oc_extension(client, headers, dataset_id)
 
     job_id = result.get("jobId") or result.get("id") or ""
+    if not job_id:
+        log.warning("ENABLE_OC: enablement API returned no job ID for %s", ctx.get("schema_name"))
+        return data
     data["ocJobId"] = job_id
     log.info("OC enablement job %s fired for %s", job_id, ctx.get("schema_name"))
     return data
