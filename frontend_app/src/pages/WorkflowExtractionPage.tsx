@@ -7,9 +7,13 @@ import {
   getExtractionStatus,
   listWorkflows,
   getWorkflowDetail,
+  startWorkflowMigration,
+  getMigrationStatus,
   type WorkflowMeta,
   type WorkflowDetail,
   type ExtractionStatus,
+  type MigrationStatus,
+  type MigrationResult,
 } from '../api/workflows'
 
 // ─── Activity type → colour pill ────────────────────────────────────────────
@@ -205,13 +209,24 @@ export default function WorkflowExtractionPage() {
   const [details, setDetails]     = useState<Record<string, WorkflowDetail | null>>({})
   const [loadingDetail, setLoadingDetail] = useState<Set<string>>(new Set())
 
+  // migration phase state
+  const [migBatchId, setMigBatchId]   = useState<string | null>(null)
+  const [migStatus, setMigStatus]     = useState<MigrationStatus | null>(null)
+  const [migError, setMigError]       = useState<string | null>(null)
+  const [bearerToken, setBearerToken] = useState('')
+  const migPollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const migStopRef = useRef(false)
+
+
   // ── On mount: check if already extracted, otherwise start job ──────────────
   useEffect(() => {
     stopRef.current = false
     runExtraction()
     return () => {
       stopRef.current = true
+      migStopRef.current = true
       if (pollRef.current) clearTimeout(pollRef.current)
+      if (migPollRef.current) clearTimeout(migPollRef.current)
     }
   }, [])
 
@@ -287,6 +302,39 @@ export default function WorkflowExtractionPage() {
       setLoadingDetail(prev => { const n = new Set(prev); n.delete(internalName); return n })
     }
   }
+
+  // ── Migration ────────────────────────────────────────────────────────────
+  async function startMigration() {
+    if (!bearerToken.trim()) {
+      setMigError('Please enter your AJO Bearer token before migrating.')
+      return
+    }
+    migStopRef.current = false
+    setMigError(null)
+    setMigStatus(null)
+    setMigBatchId(null)
+    try {
+      const job = await startWorkflowMigration(undefined, bearerToken.trim())
+      setMigBatchId(job.batch_id)
+
+      const poll = async () => {
+        if (migStopRef.current) return
+        try {
+          const s = await getMigrationStatus(job.batch_id)
+          setMigStatus(s)
+          if (s.status !== 'done' && s.status !== 'error') {
+            migPollRef.current = setTimeout(poll, 2000)
+          }
+        } catch {
+          migPollRef.current = setTimeout(poll, 3000)
+        }
+      }
+      poll()
+    } catch (err: unknown) {
+      setMigError(err instanceof Error ? err.message : 'Migration failed')
+    }
+  }
+
 
   // ── Derived ───────────────────────────────────────────────────────────────
   const pct = jobStatus && jobStatus.total > 0
@@ -461,11 +509,144 @@ export default function WorkflowExtractionPage() {
               )}
             </div>
 
-            {/* Footer note — migration not yet available */}
-            <div className="px-5 py-4 border-t border-gray-100 bg-gray-50">
-              <p className="text-xs text-gray-400">
-                Workflows have been extracted and stored. Migration to AJO will be available in a future step.
-              </p>
+          </div>
+        )}
+
+        {/* ── MIGRATION CARD (only shown after extraction) ────────────────── */}
+        {phase === 'review' && (
+          <div className="bg-white rounded-xl border border-gray-200 mt-6 overflow-hidden">
+
+            <div className="flex items-center gap-3 px-5 py-4 border-b border-gray-100">
+              <div className={`w-7 h-7 rounded-full flex items-center justify-center text-sm font-bold ${
+                migStatus?.status === 'done' ? 'bg-green-500 text-white' :
+                migBatchId ? 'bg-violet-600 text-white' : 'bg-gray-200 text-gray-500'
+              }`}>
+                {migStatus?.status === 'done' ? '✓' : '3'}
+              </div>
+              <h2 className="font-semibold text-gray-800 flex-1">Migrate workflows to AJO</h2>
+              {migStatus && (
+                <span className="text-sm text-gray-400">
+                  {migStatus.done}/{migStatus.total}
+                </span>
+              )}
+            </div>
+
+            <div className="px-5 py-4">
+              {migError && (
+                <div className="text-red-700 text-sm bg-red-50 border border-red-200 rounded-lg p-3 mb-4">
+                  {migError}
+                </div>
+              )}
+
+              {!migBatchId && (
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">
+                      AJO Bearer Token
+                    </label>
+                    <textarea
+                      value={bearerToken}
+                      onChange={e => setBearerToken(e.target.value)}
+                      placeholder="Paste your Bearer token here (get it from AJO browser DevTools → any request → Authorization header)"
+                      rows={3}
+                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-violet-400 resize-none"
+                    />
+                    <p className="text-xs text-gray-400 mt-1">
+                      DevTools → Network → any hermes-authoring.adobe.io request → Headers → Authorization (strip "Bearer ")
+                    </p>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-gray-400">
+                      Unsupported activities (fileImport, javascript, signal) will be skipped automatically.
+                    </p>
+                    <button
+                      onClick={startMigration}
+                      disabled={!bearerToken.trim()}
+                      className="shrink-0 px-4 py-2 bg-violet-600 hover:bg-violet-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
+                    >
+                      Migrate all
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {migBatchId && migStatus && (migStatus.status === 'queued' || migStatus.status === 'running') && (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2 text-sm text-gray-500">
+                    <svg className="animate-spin w-4 h-4 text-violet-400 shrink-0" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                    </svg>
+                    Migrating {migStatus.done} of {migStatus.total || '?'} workflows…
+                  </div>
+                  {migStatus.total > 0 && (
+                    <div className="w-full bg-gray-100 rounded-full h-2">
+                      <div
+                        className="bg-violet-500 h-2 rounded-full transition-all duration-500"
+                        style={{ width: `${Math.round((migStatus.done / migStatus.total) * 100)}%` }}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {migStatus && (migStatus.status === 'done' || migStatus.status === 'error') && (
+                <div className="space-y-3">
+                  {migStatus.status === 'error' && migStatus.error && (
+                    <div className="text-red-700 text-sm bg-red-50 border border-red-200 rounded-lg p-3">
+                      Job error: {migStatus.error}
+                    </div>
+                  )}
+
+                  <div className="flex gap-2 flex-wrap text-xs">
+                    {(() => {
+                      const success = migStatus.results.filter(r => r.status === 'SUCCESS').length
+                      const skipped = migStatus.results.filter(r => r.status === 'SKIPPED').length
+                      const failed  = migStatus.results.filter(r => r.status === 'FAILED').length
+                      return (
+                        <>
+                          {success > 0 && <span className="px-2 py-0.5 rounded-full bg-green-100 text-green-700">{success} migrated</span>}
+                          {skipped > 0 && <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">{skipped} skipped</span>}
+                          {failed  > 0 && <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-600">{failed} failed</span>}
+                        </>
+                      )
+                    })()}
+                  </div>
+
+                  <div className="border border-gray-100 rounded-lg divide-y divide-gray-50 max-h-72 overflow-y-auto">
+                    {migStatus.results.map((r: MigrationResult) => (
+                      <div key={r.internalName} className="flex items-start gap-3 px-4 py-2.5">
+                        <span className={`mt-0.5 shrink-0 text-xs px-2 py-0.5 rounded-full font-medium ${
+                          r.status === 'SUCCESS' ? 'bg-green-100 text-green-700' :
+                          r.status === 'SKIPPED' ? 'bg-amber-100 text-amber-700' :
+                          'bg-red-100 text-red-600'
+                        }`}>
+                          {r.status}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <span className="text-sm font-medium text-gray-800">{r.label}</span>
+                          <span className="text-xs text-gray-400 font-mono ml-2">{r.internalName}</span>
+                          {r.ajo_campaign_id && (
+                            <p className="text-xs text-gray-400 mt-0.5 font-mono truncate">
+                              Campaign: {r.ajo_campaign_id}
+                            </p>
+                          )}
+                          {(r.reason || r.error) && (
+                            <p className="text-xs text-gray-400 mt-0.5 truncate">{r.reason || r.error}</p>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <button
+                    onClick={() => { setMigBatchId(null); setMigStatus(null); setMigError(null) }}
+                    className="text-xs text-gray-400 hover:text-gray-600 underline"
+                  >
+                    Re-run migration
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}

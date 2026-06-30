@@ -1,0 +1,50 @@
+{
+  "models": [
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite"
+  ],
+
+  "classifications": {
+    "orchestrated_campaign": {
+      "label": "Orchestrated Campaign",
+      "description": "Batch/multi-step campaign workflows scheduled to run on a population.",
+      "indicators": [
+        "Has a scheduler or query activity (batch audience selection)",
+        "Has enrichment, deduplication, union, intersection, or exclusion activities",
+        "Has split or test activities for audience branching",
+        "Has updateData activity for record updates",
+        "Runs on a schedule, not triggered by a real-time event"
+      ],
+      "activity_types": ["query", "enrichment", "deduplication", "scheduler", "union", "intersection", "exclusion", "updateData", "split", "test", "reconciliation", "saveAudience", "readAudience"]
+    },
+    "journey": {
+      "label": "Journey",
+      "description": "Event-driven / 1:1 real-time workflows triggered by individual profile signals.",
+      "indicators": [
+        "Triggered by a signal or external event (signal activity)",
+        "Very few activities — typically start → wait/action → end",
+        "No batch audience-building (no query, enrichment, deduplication)",
+        "Designed for individual profile triggers, not a batch population"
+      ],
+      "activity_types": ["signal"]
+    },
+    "unsupported": {
+      "label": "Unsupported",
+      "description": "Workflows that cannot be migrated to AJO due to unsupported activity types.",
+      "indicators": [
+        "Contains file operations: fileImport, fileExport, writer, extract",
+        "Contains scripting: javascript, execJs",
+        "Contains server/transfer operations: nlserver, transfer",
+        "Contains approval or alert activities"
+      ],
+      "activity_types": ["fileImport", "fileExport", "writer", "extract", "javascript", "execJs", "nlserver", "transfer", "approval", "alert", "task"]
+    }
+  },
+
+  "prompt": {
+    "system": "You are an expert in Adobe Campaign Classic (ACC) and Adobe Journey Optimizer (AJO).\nYour task is to classify an ACC workflow into exactly one of these categories:\n\n{classification_rules}\n\nRespond ONLY with a valid JSON object in this exact format:\n{\"classification\": \"<orchestrated_campaign|journey|unsupported>\", \"reason\": \"<one sentence explanation>\"}",
+    "user_template": "Workflow name: {workflow_name}\nActivities ({activity_count}):\n{activities}\n\nEdges ({edge_count}):\n{edges}"
+  }
+}

@@ -207,6 +207,13 @@ class AccWorkflowParsed(Base):
     internal_name: Mapped[str] = mapped_column(String(255), nullable=False)
     label: Mapped[str | None] = mapped_column(String(500), nullable=True)
     workflow_data: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
+    # AJO migration result
+    ajo_campaign_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ajo_version_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ajo_workflow_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    migration_status: Mapped[str | None] = mapped_column(String(50), nullable=True)  # SUCCESS | FAILED | SKIPPED
+    migration_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    migrated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -286,6 +293,12 @@ async def init_db():
             "ALTER TABLE source_connections ADD COLUMN IF NOT EXISTS encrypted_credentials TEXT",
             "ALTER TABLE source_connections ADD COLUMN IF NOT EXISTS encrypted_access_token TEXT",
             "ALTER TABLE source_connections ADD COLUMN IF NOT EXISTS token_expires_at TIMESTAMPTZ",
+            "ALTER TABLE acc_workflow_parsed ADD COLUMN IF NOT EXISTS ajo_campaign_id VARCHAR(255)",
+            "ALTER TABLE acc_workflow_parsed ADD COLUMN IF NOT EXISTS ajo_version_id VARCHAR(255)",
+            "ALTER TABLE acc_workflow_parsed ADD COLUMN IF NOT EXISTS ajo_workflow_id VARCHAR(255)",
+            "ALTER TABLE acc_workflow_parsed ADD COLUMN IF NOT EXISTS migration_status VARCHAR(50)",
+            "ALTER TABLE acc_workflow_parsed ADD COLUMN IF NOT EXISTS migration_error TEXT",
+            "ALTER TABLE acc_workflow_parsed ADD COLUMN IF NOT EXISTS migrated_at TIMESTAMPTZ",
         ]:
             try:
                 await conn.execute(__import__("sqlalchemy").text(stmt))

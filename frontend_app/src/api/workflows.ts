@@ -101,3 +101,52 @@ export async function getWorkflowDetail(internalName: string): Promise<WorkflowD
   if (!res.ok) throw new Error(await _err(res, 'Failed to load workflow'))
   return res.json()
 }
+
+// ── Migration ──────────────────────────────────────────────────────────────
+
+export interface MigrationResult {
+  internalName: string
+  label: string
+  status: 'SUCCESS' | 'FAILED' | 'SKIPPED'
+  ajo_campaign_id?: string
+  ajo_version_id?: string
+  ajo_workflow_id?: string
+  reason?: string   // for SKIPPED
+  error?: string    // for FAILED
+}
+
+export interface MigrationStatus {
+  batch_id: string
+  status: 'queued' | 'running' | 'done' | 'error'
+  done: number
+  total: number
+  results: MigrationResult[]
+  error: string | null
+  started_at: string
+  finished_at: string | null
+}
+
+export async function startWorkflowMigration(
+  internalNames?: string[],
+  bearerToken?: string,
+): Promise<{ batch_id: string; status: string }> {
+  const res = await fetch('/api/workflows/migrate', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      internal_names: internalNames ?? null,
+      bearer_token: bearerToken ?? null,
+    }),
+  })
+  if (!res.ok) throw new Error(await _err(res, 'Failed to start migration'))
+  return res.json()
+}
+
+export async function getMigrationStatus(batchId: string): Promise<MigrationStatus> {
+  const res = await fetch(`/api/workflows/migrate/status?batch_id=${encodeURIComponent(batchId)}`, {
+    credentials: 'include',
+  })
+  if (!res.ok) throw new Error(await _err(res, 'Failed to get migration status'))
+  return res.json()
+}

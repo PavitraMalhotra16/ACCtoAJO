@@ -18,11 +18,11 @@ from typing import Optional
 
 import httpx
 from fastapi import APIRouter, Cookie, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db import AccWorkflowRaw, AccWorkflowParsed, AsyncSessionLocal, SourceConnection, get_db
-from core.security import get_login_from_cookie, get_valid_acc_token, acc_soap_headers
+from db import AccWorkflowRaw, AccWorkflowParsed, AsyncSessionLocal, SourceConnection, DestinationConnection, get_db
+from core.security import get_login_from_cookie, get_valid_acc_token, acc_soap_headers, decrypt
 from services.workflow_extractor import (
     count_workflows,
     fetch_workflow_list,
@@ -33,6 +33,10 @@ from services.workflow_extractor import (
 
 log = logging.getLogger("acc_backend.workflows")
 router = APIRouter()
+
+# In-memory job state for background migration.
+_migration_jobs: dict[str, dict] = {}
+
 
 
 # ---------------------------------------------------------------------------
@@ -486,3 +490,298 @@ async def get_workflow(
         "edges": data.get("edges", []),
         "variables_xml": data.get("variables_xml", ""),
     }
+<<<<<<< HEAD
+=======
+
+
+# ---------------------------------------------------------------------------
+# POST /api/workflows/migrate
+# ---------------------------------------------------------------------------
+
+async def _run_migration_job(
+    batch_id: str,
+    login_id: str,
+    internal_names: list[str] | None,
+    bearer_token: str,
+    org_id: str,
+    sandbox_name: str,
+) -> None:
+    """
+    Background task: push each ACC workflow to AJO as an Orchestrated Campaign.
+
+    For each workflow:
+      1. POST /orchestratedCampaigns   → campaign_id, version_id
+      2. GET  /orchestratedCampaignVersions/{version_id} → acc workflow_id
+      3. PATCH /orchestratedCampaignVersions/{version_id}/workflow → push XML
+    """
+    from services.workflow_transformer import build_workflow_xml
+    from services.ajo_workflow_pusher import migrate_workflow
+    from services.workflow_classifier import classify_workflow
+
+    job = _migration_jobs[batch_id]
+    job["status"] = "running"
+
+    try:
+        async with AsyncSessionLocal() as db:
+            query = select(AccWorkflowParsed).where(AccWorkflowParsed.login_id == login_id)
+            if internal_names:
+                query = query.where(AccWorkflowParsed.internal_name.in_(internal_names))
+            result = await db.execute(query.order_by(AccWorkflowParsed.label))
+            rows = result.scalars().all()
+
+        job["total"] = len(rows)
+        log.info("Migration job %s: %d workflows to process", batch_id, len(rows))
+
+        for row in rows:
+            wf_name = row.internal_name
+            try:
+                workflow_data = json.loads(row.workflow_data or "{}")
+
+                if not workflow_data.get("activities"):
+                    skip_reason = "No activities found — workflow is empty"
+                    log.info("Skipping %s: %s", wf_name, skip_reason)
+                    job["results"].append({
+                        "internalName": wf_name,
+                        "label": row.label,
+                        "status": "SKIPPED",
+                        "reason": skip_reason,
+                    })
+                    async with AsyncSessionLocal() as db:
+                        await db.execute(
+                            text(
+                                "UPDATE acc_workflow_parsed SET migration_status='SKIPPED', migration_error=:err, migrated_at=NOW() "
+                                "WHERE login_id=:lid AND internal_name=:name"
+                            ),
+                            {"lid": login_id, "name": wf_name, "err": skip_reason},
+                        )
+                        await db.commit()
+                    job["done"] += 1
+                    continue
+
+                # LLM classification: sole source of truth
+                classification_result = await classify_workflow(workflow_data)
+                classification = classification_result["classification"]
+                classification_reason = classification_result["reason"]
+                log.info("LLM classified %s as '%s': %s", wf_name, classification, classification_reason)
+
+                if classification == "journey":
+                    skip_reason = f"Journey-type workflow — Journey migration not yet supported. ({classification_reason})"
+                    log.info("Skipping %s: %s", wf_name, skip_reason)
+                    job["results"].append({
+                        "internalName": wf_name,
+                        "label": row.label,
+                        "status": "SKIPPED",
+                        "reason": skip_reason,
+                    })
+                    async with AsyncSessionLocal() as db:
+                        await db.execute(
+                            text(
+                                "UPDATE acc_workflow_parsed SET migration_status='SKIPPED', migration_error=:err, migrated_at=NOW() "
+                                "WHERE login_id=:lid AND internal_name=:name"
+                            ),
+                            {"lid": login_id, "name": wf_name, "err": skip_reason},
+                        )
+                        await db.commit()
+                    job["done"] += 1
+                    continue
+
+                if classification == "unsupported":
+                    skip_reason = f"Unsupported workflow type. ({classification_reason})"
+                    log.info("Skipping %s: %s", wf_name, skip_reason)
+                    job["results"].append({
+                        "internalName": wf_name,
+                        "label": row.label,
+                        "status": "SKIPPED",
+                        "reason": skip_reason,
+                    })
+                    async with AsyncSessionLocal() as db:
+                        await db.execute(
+                            text(
+                                "UPDATE acc_workflow_parsed SET migration_status='SKIPPED', migration_error=:err, migrated_at=NOW() "
+                                "WHERE login_id=:lid AND internal_name=:name"
+                            ),
+                            {"lid": login_id, "name": wf_name, "err": skip_reason},
+                        )
+                        await db.commit()
+                    job["done"] += 1
+                    continue
+
+                # classification == "orchestrated_campaign" → proceed with Hermes push
+                log.info("Migrating %s to AJO as Orchestrated Campaign", wf_name)
+
+                # Build XML with placeholder ID — migrate_workflow() replaces it
+                xml_body = build_workflow_xml(workflow_data, "PLACEHOLDER")
+
+                result_data = await migrate_workflow(
+                    name=row.label or wf_name,
+                    xml_body=xml_body,
+                    bearer_token=bearer_token,
+                    org_id=org_id,
+                    sandbox_name=sandbox_name,
+                    description=workflow_data.get("description", ""),
+                )
+
+                async with AsyncSessionLocal() as db:
+                    await db.execute(
+                        text(
+                            "UPDATE acc_workflow_parsed SET "
+                            "ajo_campaign_id=:cid, ajo_version_id=:vid, ajo_workflow_id=:wid, "
+                            "migration_status='SUCCESS', migration_error=NULL, migrated_at=NOW() "
+                            "WHERE login_id=:lid AND internal_name=:name"
+                        ),
+                        {
+                            "cid": result_data["campaign_id"],
+                            "vid": result_data["version_id"],
+                            "wid": result_data["workflow_id"],
+                            "lid": login_id,
+                            "name": wf_name,
+                        },
+                    )
+                    await db.commit()
+
+                job["results"].append({
+                    "internalName": wf_name,
+                    "label": row.label,
+                    "status": "SUCCESS",
+                    "ajo_campaign_id": result_data["campaign_id"],
+                    "ajo_version_id": result_data["version_id"],
+                    "ajo_workflow_id": result_data["workflow_id"],
+                })
+                log.info("Migrated %s → AJO campaign %s", wf_name, result_data["campaign_id"])
+
+            except Exception as exc:
+                log.exception("Failed to migrate workflow %s: %s", wf_name, exc)
+                async with AsyncSessionLocal() as db:
+                    await db.execute(
+                        text(
+                            "UPDATE acc_workflow_parsed SET migration_status='FAILED', migration_error=:err, migrated_at=NOW() "
+                            "WHERE login_id=:lid AND internal_name=:name"
+                        ),
+                        {"lid": login_id, "name": wf_name, "err": str(exc)[:500]},
+                    )
+                    await db.commit()
+                job["results"].append({
+                    "internalName": wf_name,
+                    "label": row.label,
+                    "status": "FAILED",
+                    "error": str(exc),
+                })
+            finally:
+                job["done"] += 1
+
+    except Exception as exc:
+        log.exception("Migration job %s failed: %s", batch_id, exc)
+        job["status"] = "error"
+        job["error"] = str(exc)
+    else:
+        job["status"] = "done"
+    finally:
+        job["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+
+from pydantic import BaseModel
+
+class MigrateRequest(BaseModel):
+    internal_names: list[str] | None = None
+    bearer_token: str | None = None
+
+
+async def _require_ajo(db: AsyncSession, login_id: str) -> tuple[str | None, str, str]:
+    """
+    Resolve AJO connection and return (bearer_token_or_None, org_id, sandbox_name).
+    Does NOT raise if no token stored — caller decides whether to fall back to a provided token.
+    Raises 400 only if org_id is missing entirely (no connection row at all).
+    """
+    result = await db.execute(select(DestinationConnection))
+    conn = result.scalars().first()
+    if not conn or not conn.org_id:
+        raise HTTPException(400, "AJO not configured — connect to AJO first via /api/ajo/connect to set org_id and sandbox")
+
+    stored_token: str | None = None
+    if conn.encrypted_access_token:
+        try:
+            stored_token = decrypt(conn.encrypted_access_token)
+        except Exception:
+            pass
+
+    return stored_token, conn.org_id, conn.sandbox_name or "prod"
+
+
+@router.post("/api/workflows/migrate")
+async def migrate_workflows(
+    body: MigrateRequest,
+    acc_session: Optional[str] = Cookie(default=None),
+    acc_user: Optional[str] = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Start background migration of ACC workflows → AJO Orchestrated Campaigns.
+
+    Body: { "internal_names": ["WKF2", "WKF6"] }  // omit or null = migrate all candidates
+
+    Returns { batch_id, status, total } immediately.
+    Poll GET /api/workflows/migrate/status?batch_id=... for progress.
+    """
+    login_id = await get_login_from_cookie(acc_session, db, acc_user)
+    if not login_id:
+        raise HTTPException(401, "Not authenticated")
+
+    bearer_token = body.bearer_token.strip() if body.bearer_token else None
+    if not bearer_token:
+        raise HTTPException(401, "No Bearer token — provide bearer_token in request body")
+    org_id = "31D5272C69BA859C0A495CE0@AdobeOrg"
+    sandbox_name = "prod"
+
+    batch_id = str(uuid.uuid4())
+    _migration_jobs[batch_id] = {
+        "status": "queued",
+        "done": 0,
+        "total": 0,
+        "results": [],
+        "error": None,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+    }
+
+    asyncio.create_task(
+        _run_migration_job(batch_id, login_id, body.internal_names, bearer_token, org_id, sandbox_name)
+    )
+
+    return {"batch_id": batch_id, "status": "queued"}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/workflows/migrate/status
+# ---------------------------------------------------------------------------
+
+@router.get("/api/workflows/migrate/status")
+async def get_migration_status(
+    batch_id: str,
+    acc_session: Optional[str] = Cookie(default=None),
+    acc_user: Optional[str] = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Poll migration progress for a given batch_id.
+
+    Response:
+      status   — 'queued' | 'running' | 'done' | 'error'
+      done     — workflows processed so far
+      total    — total workflows in this batch
+      results  — per-workflow { internalName, label, status, ajo_campaign_id?, error? }
+    """
+    job = _migration_jobs.get(batch_id)
+    if job is None:
+        raise HTTPException(404, f"No migration job found for batch_id={batch_id}")
+
+    return {
+        "batch_id": batch_id,
+        "status": job["status"],
+        "done": job["done"],
+        "total": job["total"],
+        "results": job["results"],
+        "error": job.get("error"),
+        "started_at": job["started_at"],
+        "finished_at": job["finished_at"],
+    }
+>>>>>>> b902254 (feat: add workflow extraction, LLM classification, and AJO migration pipeline)
