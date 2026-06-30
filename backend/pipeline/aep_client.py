@@ -230,7 +230,7 @@ async def enable_oc_extension(client: httpx.AsyncClient, headers: dict, dataset_
 async def get_oc_enablement_job_status(client: httpx.AsyncClient, headers: dict, job_id: str) -> dict:
     """GET /modeler/datasets/extensions/enablement/jobs/{jobId} — poll job status."""
     resp = await client.get(
-        f"{OC_MODELER_BASE}/datasets/extensions/enablement/jobs/{job_id}",
+        f"{OC_MODELER_BASE}/datasets/extensions/enablement/jobs/{_encode_id(job_id)}",
         headers=headers,
     )
     _raise_for(resp, "Get OC job status")
