@@ -1,7 +1,12 @@
+import csv
+import io
+import json
 import logging
+import re
 from typing import Optional
 
 import httpx
+from dateutil import parser as dateutil_parser
 from fastapi import APIRouter, Cookie, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +16,93 @@ from pipeline import batch_client
 from pipeline.handlers import get_valid_access_token
 
 log = logging.getLogger("acc_backend.datasets")
+
+# Regex: strings that look like a date/datetime (must contain digits + separators).
+# Catches  2023/01/15 10:30:00  |  01-15-2023  |  2023-01-15T10:30:00Z  etc.
+_DATE_HINT = re.compile(
+    r"^\d{1,4}[/\-]\d{1,2}[/\-]\d{1,4}"        # date part
+    r"([ T]\d{1,2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$"  # optional time
+)
+
+
+def _to_iso(value: str) -> str:
+    """Try to parse a date-like string and return ISO 8601 UTC.  Return original on failure."""
+    try:
+        dt = dateutil_parser.parse(value)
+        # Normalise to UTC-aware ISO 8601 with Z suffix
+        if dt.tzinfo is None:
+            return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        from datetime import timezone
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return value
+
+
+def _normalize_csv(data: bytes) -> tuple[bytes, int]:
+    """Detect date-like columns in a CSV and convert values to ISO 8601.
+
+    Returns (normalised_bytes, columns_fixed).
+    """
+    text = data.decode("utf-8-sig")  # strip BOM if present
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        return data, 0
+
+    rows = list(reader)
+    if not rows:
+        return data, 0
+
+    # Detect which columns look like dates by sampling the first non-empty value.
+    date_cols: set[str] = set()
+    for col in reader.fieldnames:
+        for row in rows:
+            val = (row.get(col) or "").strip()
+            if val and _DATE_HINT.match(val):
+                date_cols.add(col)
+                break
+
+    if not date_cols:
+        return data, 0
+
+    # Re-write those columns.
+    for row in rows:
+        for col in date_cols:
+            val = (row.get(col) or "").strip()
+            if val:
+                row[col] = _to_iso(val)
+
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=reader.fieldnames, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    return out.getvalue().encode("utf-8"), len(date_cols)
+
+
+def _normalize_json(data: bytes) -> tuple[bytes, int]:
+    """Walk a JSON array-of-objects and convert date-like string values to ISO 8601.
+
+    Returns (normalised_bytes, fields_fixed_count).
+    """
+    try:
+        records = json.loads(data)
+    except Exception:
+        return data, 0
+
+    if not isinstance(records, list):
+        return data, 0
+
+    fixed = 0
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        for key, val in record.items():
+            if isinstance(val, str) and _DATE_HINT.match(val.strip()):
+                new_val = _to_iso(val.strip())
+                if new_val != val:
+                    record[key] = new_val
+                    fixed += 1
+
+    return json.dumps(records, ensure_ascii=False).encode("utf-8"), fixed
 
 router = APIRouter(prefix="/api/datasets")
 
@@ -116,6 +208,16 @@ async def ingest_dataset(
     file_bytes = await file.read()
     if len(file_bytes) > _MAX_BYTES:
         raise HTTPException(status_code=413, detail="File exceeds 256 MB single-upload limit")
+
+    # Auto-normalize date/datetime columns to ISO 8601 before upload.
+    fixed_cols = 0
+    if fmt == "csv":
+        file_bytes, fixed_cols = _normalize_csv(file_bytes)
+    elif fmt == "json":
+        file_bytes, fixed_cols = _normalize_json(file_bytes)
+
+    if fixed_cols:
+        log.info("Normalized %d date column(s) to ISO 8601 in %s", fixed_cols, file.filename)
 
     size_label = (
         f"{len(file_bytes) / 1024:.1f} KB"
