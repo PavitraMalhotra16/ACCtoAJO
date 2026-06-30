@@ -171,10 +171,23 @@ async def run_schema_phase2(
     data: dict,
     resume_from_step: int = 0,
 ) -> None:
-    """PASS 2 — wire relationships, create dataset, verify, then mark final state."""
+    """PASS 2 — wire relationships, create dataset, verify, OC, then mark final state."""
     ok, data = await _run_steps(item_id, ctx, _PHASE2_STEPS, data, resume_from_step)
     if not ok:
         return
+
+    # Persist OC fields regardless of whether OC steps succeeded (OC failure ≠ push failure).
+    oc_supported = data.get("ocSupported")
+    oc_reason = data.get("ocNotSupportedReason")
+    oc_job_id = data.get("ocJobId")
+    oc_status: str | None = None
+    if oc_supported is False:
+        oc_status = "NOT_ELIGIBLE"
+    elif oc_job_id:
+        oc_status = "PENDING"
+        # Spawn background poller — detached, pipeline doesn't wait.
+        from pipeline.handlers import _poll_oc_job  # local import to avoid circular at module load
+        asyncio.create_task(_poll_oc_job(oc_job_id, item_id, ctx))
 
     field_changes = data.get("changesMade", 0)
     rel_changes = data.get("relationshipsCreated", 0)
@@ -186,9 +199,15 @@ async def run_schema_phase2(
         final_step = "UPDATED"
     else:
         final_step = "COMPLETED"
-    await _update_item(item_id, "COMPLETED", final_step, _TOTAL_STEPS,
-                       fields_added=data.get("fieldsChanged", 0) if final_step == "UPDATED" else None)
-    log.info("Schema %s push complete (%s)", ctx.get("schema_name"), final_step)
+    await _update_item(
+        item_id, "COMPLETED", final_step, _TOTAL_STEPS,
+        fields_added=data.get("fieldsChanged", 0) if final_step == "UPDATED" else None,
+        oc_supported=oc_supported,
+        oc_not_supported_reason=oc_reason,
+        oc_job_id=oc_job_id if oc_job_id else None,
+        oc_status=oc_status,
+    )
+    log.info("Schema %s push complete (%s) oc_status=%s", ctx.get("schema_name"), final_step, oc_status)
 
 
 async def run_migration_job(
