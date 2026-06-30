@@ -23,7 +23,7 @@ SCHEMA_REGISTRY_BASE = f"{PLATFORM_HOST}/data/foundation/schemaregistry"
 CATALOG_BASE = f"{PLATFORM_HOST}/data/foundation/catalog"
 # Identity Service is region-scoped — this org's region is va7 (spec §2).
 IDENTITY_BASE = "https://platform-va7.adobe.io/data/core/idnamespace"
-OC_MODELER_BASE = "https://platform.adobe.io/modeler"
+OC_MODELER_BASE = f"{PLATFORM_HOST}/ajo/relational/modeler"
 
 # Fixed literal that marks a schema as relational/model-based (spec §4).
 ADHOC_EXTENDS = "https://ns.adobe.com/xdm/data/adhoc-v2"
