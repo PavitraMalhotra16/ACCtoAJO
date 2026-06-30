@@ -20,8 +20,10 @@ log = logging.getLogger("acc_backend.pipeline.aep")
 # ── Endpoints (spec §2 / §13) ────────────────────────────────────────────────
 PLATFORM_HOST = "https://platform.adobe.io"
 SCHEMA_REGISTRY_BASE = f"{PLATFORM_HOST}/data/foundation/schemaregistry"
+CATALOG_BASE = f"{PLATFORM_HOST}/data/foundation/catalog"
 # Identity Service is region-scoped — this org's region is va7 (spec §2).
 IDENTITY_BASE = "https://platform-va7.adobe.io/data/core/idnamespace"
+OC_MODELER_BASE = "https://platform.adobe.io/modeler"
 
 # Fixed literal that marks a schema as relational/model-based (spec §4).
 ADHOC_EXTENDS = "https://ns.adobe.com/xdm/data/adhoc-v2"
@@ -139,6 +141,54 @@ async def create_tenant_descriptor(client: httpx.AsyncClient, headers: dict, bod
     return resp.json()
 
 
+async def delete_tenant_descriptor(client: httpx.AsyncClient, headers: dict, descriptor_id: str) -> None:
+    """DELETE /tenant/descriptors/{id} — removes a descriptor by its @id."""
+    resp = await client.delete(
+        f"{SCHEMA_REGISTRY_BASE}/tenant/descriptors/{_encode_id(descriptor_id)}", headers=headers
+    )
+    _raise_for(resp, "Delete descriptor")
+
+
+# ── Datasets (Catalog Service) ───────────────────────────────────────────────────
+async def list_datasets_for_schema(client: httpx.AsyncClient, headers: dict, schema_id: str) -> list[dict]:
+    """GET /dataSets filtered by schemaRef.id — uses server-side filtering so pagination
+    and large sandbox dataset counts don't cause false misses."""
+    resp = await client.get(
+        f"{CATALOG_BASE}/dataSets",
+        headers=headers,
+        params={"limit": 10, "property": f"schemaRef.id=={schema_id}"},
+    )
+    _raise_for(resp, "List datasets")
+    payload = resp.json()
+    results = []
+    if isinstance(payload, dict):
+        for ds_id, ds in payload.items():
+            ref = (ds.get("schemaRef") or {}).get("id", "")
+            if ref == schema_id:
+                results.append({"id": ds_id, **ds})
+    return results
+
+
+async def create_dataset(client: httpx.AsyncClient, headers: dict, name: str, schema_id: str) -> str:
+    """POST /dataSets — creates a dataset backed by an existing XDM schema.
+    Returns the dataset ID (the bare ID string, not the @/dataSets/... path)."""
+    body = {
+        "name": name,
+        "schemaRef": {
+            "id": schema_id,
+            "contentType": "application/vnd.adobe.xed+json;version=1",
+        },
+    }
+    resp = await client.post(f"{CATALOG_BASE}/dataSets", headers=headers, json=body)
+    _raise_for(resp, "Create dataset")
+    result = resp.json()
+    # Response is ["@/dataSets/{id}"]
+    if isinstance(result, list) and result:
+        path = result[0]
+        return path.split("/")[-1]
+    raise RuntimeError(f"Unexpected create dataset response: {result}")
+
+
 # ── Identity namespaces (region host) ───────────────────────────────────────────
 async def list_identity_namespaces(client: httpx.AsyncClient, headers: dict) -> list[dict]:
     """GET /idnamespace/identities — scan for a matching `code`."""
@@ -152,4 +202,36 @@ async def create_identity_namespace(client: httpx.AsyncClient, headers: dict, bo
     """POST /idnamespace/identities — create a namespace (idType is locked once set)."""
     resp = await client.post(f"{IDENTITY_BASE}/identities", headers=headers, json=body)
     _raise_for(resp, "Create identity namespace")
+    return resp.json()
+
+
+# ── Orchestrated Campaigns (OC) Modeler ─────────────────────────────────────
+async def validate_oc_extension(client: httpx.AsyncClient, headers: dict, dataset_id: str) -> dict:
+    """GET /modeler/datasets/{id}/extensions/validation — check OC eligibility."""
+    resp = await client.get(
+        f"{OC_MODELER_BASE}/datasets/{dataset_id}/extensions/validation",
+        headers=headers,
+    )
+    _raise_for(resp, "Validate OC extension")
+    return resp.json()
+
+
+async def enable_oc_extension(client: httpx.AsyncClient, headers: dict, dataset_id: str) -> dict:
+    """POST /modeler/datasets/extensions/enablement — fire async OC enablement job."""
+    resp = await client.post(
+        f"{OC_MODELER_BASE}/datasets/extensions/enablement",
+        headers=headers,
+        json={"datasetId": dataset_id},
+    )
+    _raise_for(resp, "Enable OC extension")
+    return resp.json()
+
+
+async def get_oc_enablement_job_status(client: httpx.AsyncClient, headers: dict, job_id: str) -> dict:
+    """GET /modeler/datasets/extensions/enablement/jobs/{jobId} — poll job status."""
+    resp = await client.get(
+        f"{OC_MODELER_BASE}/datasets/extensions/enablement/jobs/{job_id}",
+        headers=headers,
+    )
+    _raise_for(resp, "Get OC job status")
     return resp.json()
