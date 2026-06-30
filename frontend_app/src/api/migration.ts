@@ -11,7 +11,7 @@ export interface MigrationSchemaItem {
   oc_supported?: boolean | null
   oc_not_supported_reason?: string | null
   oc_job_id?: string | null
-  oc_status?: string | null
+  oc_status?: 'ENABLED' | 'PENDING' | 'NOT_ELIGIBLE' | 'FAILED' | null
   created_at: string
   completed_at: string | null
 }
