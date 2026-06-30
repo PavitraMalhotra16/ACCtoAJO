@@ -144,9 +144,12 @@ async def get_template_count(
     conn, token = await _require_acc(db, login_id)
     soap_token = "" if conn.auth_type == "technical" else token
     auth_hdrs = acc_soap_headers(conn, token)
-    total = await count_templates(
-        _soap_url(conn.instance_url), soap_token, conn.security_token or "", auth_headers=auth_hdrs
-    )
+    try:
+        total = await count_templates(
+            _soap_url(conn.instance_url), soap_token, conn.security_token or "", auth_headers=auth_hdrs
+        )
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc))
     to_migrate = max(0, total - stored)
     return {"total": total, "stored": stored, "to_migrate": to_migrate}
 
@@ -167,9 +170,12 @@ async def extract_templates(
     # with ACC's fixed ordering even when some rows were previously skipped/excluded
     start_line = await _soap_offset(db, login_id)
 
-    templates = await fetch_template_list(
-        soap_url, soap_token, conn.security_token or "", start_line=start_line, auth_headers=auth_hdrs
-    )
+    try:
+        templates = await fetch_template_list(
+            soap_url, soap_token, conn.security_token or "", start_line=start_line, auth_headers=auth_hdrs
+        )
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc))
     log.info("ACC template list returned %d template(s) (start_line=%d)", len(templates), start_line)
     if not templates:
         return {"extracted": 0, "total_found": 0, "skipped": 0, "batch_id": None, "errors": []}
@@ -248,7 +254,10 @@ async def get_folder_config(
     if not login_id:
         raise HTTPException(401, "Not authenticated")
     dest_result = await db.execute(
-        select(DestinationConnection).where(DestinationConnection.authenticated == True)
+        select(DestinationConnection)
+        .where(DestinationConnection.authenticated == True)
+        .order_by(DestinationConnection.last_authenticated_at.desc())
+        .limit(1)
     )
     dest = dest_result.scalar_one_or_none()
     if not dest:
@@ -271,7 +280,10 @@ async def get_folder_config(
 
 async def _require_ajo(db: AsyncSession) -> DestinationConnection:
     result = await db.execute(
-        select(DestinationConnection).where(DestinationConnection.authenticated == True)
+        select(DestinationConnection)
+        .where(DestinationConnection.authenticated == True)
+        .order_by(DestinationConnection.last_authenticated_at.desc())
+        .limit(1)
     )
     dest = result.scalar_one_or_none()
     if not dest:
@@ -378,7 +390,6 @@ async def template_analysis(
         if json.loads(r.template_data or "{}").get("internalName") not in _EXCLUDED_INTERNAL_NAMES
     ]
 
-<<<<<<< HEAD
     # Also load raw XML rows keyed by source_id for fallback placeholder scanning
     raw_result = await db.execute(
         select(AccTemplateRaw).where(AccTemplateRaw.login_id == login_id)
@@ -387,41 +398,21 @@ async def template_analysis(
         r.source_id: (r.raw_xml or "") for r in raw_result.scalars().all()
     }
 
-    re_recipient = re.compile(r"<%=\s*(recipient\.[\w.]+)\s*%>")
-    re_target = re.compile(r"<%=\s*(targetData\.[\w.]+)\s*%>")
-=======
     re_recipient = re.compile(r"(?:<%=|&lt;%=)\s*(recipient\.[\w.]+)\s*(?:%>|%&gt;)")
     re_target = re.compile(r"(?:<%=|&lt;%=)\s*(targetData\.[\w.]+)\s*(?:%>|%&gt;)")
->>>>>>> dd78022dd8817b64d832013cc6025f840339690d
 
     unique_recipient: dict[str, str] = {}
     unique_target: dict[str, str] = {}
 
     for row in rows:
-<<<<<<< HEAD
         parsed = json.loads(row.template_data or "{}")
-        html_body = (parsed.get("htmlBody", "") or "")
-        sms_content = (parsed.get("smsContent", "") or "")
-        text = html_body + " " + sms_content
-
-        # Fallback: if parsed content fields are empty, scan the raw XML directly
-        if not text.strip():
-            text = raw_by_source.get(row.source_id, "")
-            log.info(
-                "analysis: parsed content empty for source_id=%s, falling back to raw XML (%d chars)",
-                row.source_id, len(text),
-            )
-
-=======
-        if not row.template_data:
-            continue
-        parsed = json.loads(row.template_data)
         text = (
             (parsed.get("subject", "") or "") + " " +
             (parsed.get("htmlBody", "") or "") + " " +
-            (parsed.get("smsContent", "") or "")
+            (parsed.get("smsContent", "") or "") + " " +
+            raw_by_source.get(row.source_id, "")
         )
->>>>>>> dd78022dd8817b64d832013cc6025f840339690d
+
         for m in re_recipient.finditer(text):
             field = m.group(1)
             if field not in unique_recipient:
