@@ -254,7 +254,10 @@ async def get_folder_config(
     if not login_id:
         raise HTTPException(401, "Not authenticated")
     dest_result = await db.execute(
-        select(DestinationConnection).where(DestinationConnection.authenticated == True)
+        select(DestinationConnection)
+        .where(DestinationConnection.authenticated == True)
+        .order_by(DestinationConnection.last_authenticated_at.desc())
+        .limit(1)
     )
     dest = dest_result.scalar_one_or_none()
     if not dest:
@@ -277,7 +280,10 @@ async def get_folder_config(
 
 async def _require_ajo(db: AsyncSession) -> DestinationConnection:
     result = await db.execute(
-        select(DestinationConnection).where(DestinationConnection.authenticated == True)
+        select(DestinationConnection)
+        .where(DestinationConnection.authenticated == True)
+        .order_by(DestinationConnection.last_authenticated_at.desc())
+        .limit(1)
     )
     dest = result.scalar_one_or_none()
     if not dest:

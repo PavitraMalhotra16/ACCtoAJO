@@ -7,7 +7,7 @@
     powershell -ExecutionPolicy Bypass -File scripts\start-backend.ps1
     powershell -ExecutionPolicy Bypass -File scripts\start-backend.ps1 -Port 8000
 #>
-param([int]$Port = 8001)
+param([int]$Port = 8000)
 $ErrorActionPreference = 'SilentlyContinue'
 
 $root    = Split-Path -Parent $PSScriptRoot
