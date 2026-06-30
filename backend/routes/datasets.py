@@ -17,33 +17,67 @@ from pipeline.handlers import get_valid_access_token
 
 log = logging.getLogger("acc_backend.datasets")
 
-# Regex: strings that look like a date/datetime (must contain digits + separators).
-# Catches  2023/01/15 10:30:00  |  01-15-2023  |  2023-01-15T10:30:00Z  etc.
+# ── Type-normalization helpers ────────────────────────────────────────────────
+
+# Date/datetime: digits + separators, optional time component.
 _DATE_HINT = re.compile(
-    r"^\d{1,4}[/\-]\d{1,2}[/\-]\d{1,4}"        # date part
-    r"([ T]\d{1,2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$"  # optional time
+    r"^\d{1,4}[/\-]\d{1,2}[/\-]\d{1,4}"
+    r"([ T]\d{1,2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$"
 )
+
+# Whole-number float: e.g. "3011.00", "42.0"  (no non-zero fractional digits)
+_WHOLE_FLOAT = re.compile(r"^-?\d+\.0+$")
+
+# Boolean-like strings
+_BOOL_TRUE  = {"true",  "yes", "1", "on"}
+_BOOL_FALSE = {"false", "no",  "0", "off"}
 
 
 def _to_iso(value: str) -> str:
-    """Try to parse a date-like string and return ISO 8601 UTC.  Return original on failure."""
+    """Parse a date-like string → ISO 8601 UTC.  Returns original on failure."""
     try:
+        from datetime import timezone
         dt = dateutil_parser.parse(value)
-        # Normalise to UTC-aware ISO 8601 with Z suffix
         if dt.tzinfo is None:
             return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-        from datetime import timezone
         return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     except Exception:
         return value
 
 
-def _normalize_csv(data: bytes) -> tuple[bytes, int]:
-    """Detect date-like columns in a CSV and convert values to ISO 8601.
+def _coerce_value(val: str) -> str:
+    """Apply all type coercions to a single CSV cell value (string in, string out).
 
-    Returns (normalised_bytes, columns_fixed).
+    Order matters — date check before numeric so '2023/01/15' isn't mis-coerced.
     """
-    text = data.decode("utf-8-sig")  # strip BOM if present
+    v = val.strip()
+    if not v:
+        return val
+
+    # 1. Date / datetime → ISO 8601
+    if _DATE_HINT.match(v):
+        return _to_iso(v)
+
+    # 2. Whole-number float → integer string  ("3011.00" → "3011")
+    if _WHOLE_FLOAT.match(v):
+        return str(int(float(v)))
+
+    # 3. Boolean strings → lowercase canonical ("True" → "true", "YES" → "true")
+    vl = v.lower()
+    if vl in _BOOL_TRUE:
+        return "true"
+    if vl in _BOOL_FALSE:
+        return "false"
+
+    return val
+
+
+def _normalize_csv(data: bytes) -> tuple[bytes, int]:
+    """Coerce every cell in a CSV to its AEP-compatible type representation.
+
+    Returns (normalised_bytes, cells_changed).
+    """
+    text = data.decode("utf-8-sig")
     reader = csv.DictReader(io.StringIO(text))
     if not reader.fieldnames:
         return data, 0
@@ -52,36 +86,29 @@ def _normalize_csv(data: bytes) -> tuple[bytes, int]:
     if not rows:
         return data, 0
 
-    # Detect which columns look like dates by sampling the first non-empty value.
-    date_cols: set[str] = set()
-    for col in reader.fieldnames:
-        for row in rows:
-            val = (row.get(col) or "").strip()
-            if val and _DATE_HINT.match(val):
-                date_cols.add(col)
-                break
-
-    if not date_cols:
-        return data, 0
-
-    # Re-write those columns.
+    changed = 0
     for row in rows:
-        for col in date_cols:
-            val = (row.get(col) or "").strip()
-            if val:
-                row[col] = _to_iso(val)
+        for col in reader.fieldnames:
+            original = row.get(col, "")
+            coerced = _coerce_value(original)
+            if coerced != original:
+                row[col] = coerced
+                changed += 1
+
+    if not changed:
+        return data, 0
 
     out = io.StringIO()
     writer = csv.DictWriter(out, fieldnames=reader.fieldnames, lineterminator="\n")
     writer.writeheader()
     writer.writerows(rows)
-    return out.getvalue().encode("utf-8"), len(date_cols)
+    return out.getvalue().encode("utf-8"), changed
 
 
 def _normalize_json(data: bytes) -> tuple[bytes, int]:
-    """Walk a JSON array-of-objects and convert date-like string values to ISO 8601.
+    """Coerce string values in a JSON array-of-objects to AEP-compatible types.
 
-    Returns (normalised_bytes, fields_fixed_count).
+    Returns (normalised_bytes, values_changed).
     """
     try:
         records = json.loads(data)
@@ -91,18 +118,27 @@ def _normalize_json(data: bytes) -> tuple[bytes, int]:
     if not isinstance(records, list):
         return data, 0
 
-    fixed = 0
+    changed = 0
     for record in records:
         if not isinstance(record, dict):
             continue
-        for key, val in record.items():
-            if isinstance(val, str) and _DATE_HINT.match(val.strip()):
-                new_val = _to_iso(val.strip())
-                if new_val != val:
-                    record[key] = new_val
-                    fixed += 1
+        for key, val in list(record.items()):
+            if not isinstance(val, str):
+                continue
+            coerced = _coerce_value(val)
+            if coerced != val:
+                # For JSON, also convert numeric/bool strings to native types
+                if _WHOLE_FLOAT.match(val.strip()):
+                    record[key] = int(float(val.strip()))
+                elif val.strip().lower() in _BOOL_TRUE:
+                    record[key] = True
+                elif val.strip().lower() in _BOOL_FALSE:
+                    record[key] = False
+                else:
+                    record[key] = coerced
+                changed += 1
 
-    return json.dumps(records, ensure_ascii=False).encode("utf-8"), fixed
+    return json.dumps(records, ensure_ascii=False).encode("utf-8"), changed
 
 router = APIRouter(prefix="/api/datasets")
 
@@ -217,7 +253,7 @@ async def ingest_dataset(
         file_bytes, fixed_cols = _normalize_json(file_bytes)
 
     if fixed_cols:
-        log.info("Normalized %d date column(s) to ISO 8601 in %s", fixed_cols, file.filename)
+        log.info("Normalized %d value(s) (dates/ints/bools) in %s before upload", fixed_cols, file.filename)
 
     size_label = (
         f"{len(file_bytes) / 1024:.1f} KB"
