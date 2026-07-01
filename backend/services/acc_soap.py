@@ -752,6 +752,315 @@ def parse_fault(xml_text: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Workflow envelope builders + parsers
+# ---------------------------------------------------------------------------
+
+def build_list_workflows_envelope(session_token: str, security_token: str) -> bytes:
+    """
+    List all xtk:workflow objects — returns internalName, label, desc, folder label.
+    Excludes system built-ins (@builtIn=1).
+    """
+    envelope = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<soapenv:Envelope '
+        '    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
+        '    xmlns:urn="urn:xtk:queryDef">'
+        "<soapenv:Header>"
+        '<urn:SecurityHeader xmlns:urn="urn:xtk:session">'
+        f"<urn:sessiontoken>{_xml_escape(session_token)}</urn:sessiontoken>"
+        f"<urn:securityToken>{_xml_escape(security_token)}</urn:securityToken>"
+        "</urn:SecurityHeader>"
+        "</soapenv:Header>"
+        "<soapenv:Body>"
+        "<urn:ExecuteQuery>"
+        f"<urn:sessiontoken>{_xml_escape(session_token)}</urn:sessiontoken>"
+        "<urn:entity>"
+        '<queryDef schema="xtk:workflow" operation="select" lineCount="9999">'
+        "<select>"
+        '<node expr="@id"/>'
+        '<node expr="@internalName"/>'
+        '<node expr="@label"/>'
+        '<node expr="@status"/>'
+        "</select>"
+        "<where>"
+        '<condition expr="@builtIn != 1"/>'
+        "</where>"
+        '<orderBy><node expr="@label"/></orderBy>'
+        "</queryDef>"
+        "</urn:entity>"
+        "</urn:ExecuteQuery>"
+        "</soapenv:Body>"
+        "</soapenv:Envelope>"
+    )
+    return envelope.encode("utf-8")
+
+
+def build_get_workflow_detail_envelope(
+    session_token: str, security_token: str,
+    workflow_id: str = "", internal_name: str = "",
+) -> bytes:
+    """
+    Fetch full workflow entity including mData XML via xtk:queryDef#ExecuteQuery.
+
+    ACC stores the complete workflow definition (activities, transitions, etc.)
+    in SQL column mData. In XTK naming, mData (MEMO type) is exposed as a child
+    element named "data" — no @ prefix. This is what the ACC UI uses when
+    opening a workflow in the editor.
+
+    The response contains <workflow ...><data>...full XML...</data></workflow>
+    where the <data> element's text is the serialized workflow definition.
+    """
+    if workflow_id and workflow_id.isdigit():
+        where = f'<condition expr="@id = {int(workflow_id)}"/>'
+    elif internal_name:
+        where = f'<condition expr="@internalName = &apos;{_xml_escape(internal_name)}&apos;"/>'
+    else:
+        raise ValueError("Either workflow_id or internal_name must be provided")
+
+    envelope = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<soapenv:Envelope '
+        '    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
+        '    xmlns:urn="urn:xtk:queryDef">'
+        "<soapenv:Header>"
+        '<urn:SecurityHeader xmlns:urn="urn:xtk:session">'
+        f"<urn:sessiontoken>{_xml_escape(session_token)}</urn:sessiontoken>"
+        f"<urn:securityToken>{_xml_escape(security_token)}</urn:securityToken>"
+        "</urn:SecurityHeader>"
+        "</soapenv:Header>"
+        "<soapenv:Body>"
+        "<urn:ExecuteQuery>"
+        f"<urn:sessiontoken>{_xml_escape(session_token)}</urn:sessiontoken>"
+        "<urn:entity>"
+        '<queryDef schema="xtk:workflow" operation="get">'
+        "<select>"
+        '<node expr="@id"/>'
+        '<node expr="@internalName"/>'
+        '<node expr="@label"/>'
+        '<node expr="@status"/>'
+        '<node expr="data"/>'
+        "</select>"
+        "<where>"
+        + where
+        + "</where>"
+        "</queryDef>"
+        "</urn:entity>"
+        "</urn:ExecuteQuery>"
+        "</soapenv:Body>"
+        "</soapenv:Envelope>"
+    )
+    return envelope.encode("utf-8")
+
+
+def parse_workflows(xml_text: str) -> list[dict]:
+    """
+    Parse the xtk:workflow list SOAP response.
+    Returns a list of lightweight workflow metadata dicts (no activity detail).
+    """
+    log.debug("parse_workflows raw (first 800): %s", xml_text[:800])
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        log.error("Failed to parse workflow list XML: %s", exc)
+        return []
+
+    fault = parse_fault(xml_text)
+    if fault:
+        log.error("SOAP fault in workflow list response: %s", fault)
+        return []
+
+    results = []
+    for el in root.iter():
+        local = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+        if local != "workflow":
+            continue
+        internal_name = el.get("internalName", "")
+        if not internal_name:
+            continue
+        results.append({
+            "id": el.get("id", el.get("_id", "")),
+            "internalName": internal_name,
+            "label": el.get("label", "") or el.get("_cs", "") or internal_name,
+            "folder": el.get("folder-label", ""),
+            "status": el.get("status", ""),
+        })
+
+    log.info("Parsed %d workflows from ACC response", len(results))
+    return results
+
+
+def _local(tag: str) -> str:
+    return tag.split("}")[-1] if "}" in tag else tag
+
+
+def _first_child(parent: ET.Element, name: str) -> ET.Element | None:
+    for child in parent:
+        if _local(child.tag) == name:
+            return child
+    return None
+
+
+def _elem_to_obj(el: ET.Element) -> dict:
+    """Recursively convert an XML element into a JSON-serializable dict."""
+    return {
+        "tag": _local(el.tag),
+        "attributes": dict(el.attrib),
+        "text": (el.text or "").strip(),
+        "children": [_elem_to_obj(c) for c in el],
+    }
+
+
+def _parse_activity(act_el: ET.Element) -> dict:
+    """
+    Convert one activity XML element into a normalized dict.
+
+    type       — XML tag name (start, query, fileImport, delivery, etc.)
+    attributes — all XML attributes on the element
+    transitions — parsed from the <transitions> child element; each transition
+                  includes type (initial/result/done/remainder), name, target, enabled
+    config     — full recursive element tree for activity-specific config subtrees
+    rawXml     — serialized XML of the activity element
+    """
+    transitions = []
+    transitions_el = _first_child(act_el, "transitions")
+    if transitions_el is not None:
+        for tr in transitions_el:
+            transitions.append({
+                "transitionType": _local(tr.tag),
+                "name": tr.get("name", ""),
+                "target": tr.get("target", ""),
+                "enabled": tr.get("enabled", ""),
+                "attributes": dict(tr.attrib),
+            })
+
+    return {
+        "type": _local(act_el.tag),
+        "name": act_el.get("name", ""),
+        "label": act_el.get("label", "") or act_el.get("_cs", ""),
+        "x": act_el.get("x", ""),
+        "y": act_el.get("y", ""),
+        "attributes": dict(act_el.attrib),
+        "transitions": transitions,
+        "config": _elem_to_obj(act_el),
+        "rawXml": ET.tostring(act_el, encoding="unicode"),
+    }
+
+
+def _parse_edges(activities: list[dict]) -> list[dict]:
+    """Flatten all transitions across activities into a directed edge list."""
+    edges = []
+    for act in activities:
+        for tr in act.get("transitions", []):
+            edges.append({
+                "fromActivity": act["name"],
+                "fromType": act["type"],
+                "transitionType": tr.get("transitionType", ""),
+                "transitionName": tr.get("name", ""),
+                "toActivity": tr.get("target", ""),
+                "enabled": tr.get("enabled", ""),
+            })
+    return edges
+
+
+def parse_workflow_detail(xml_text: str, internal_name: str) -> dict | None:
+    """
+    Parse the adbe:exportData#getPackage response into a structured dict.
+
+    Expected response shape (package export):
+      <package>
+        <entities schema="xtk:workflow">
+          <workflow internalName="..." label="..." ...>
+            <activities>
+              <start name="..." .../>
+              <query name="..." .../>
+              ...
+            </activities>
+            <variables .../>
+          </workflow>
+        </entities>
+      </package>
+
+    Searches the entire response tree for a <workflow> element so it works
+    regardless of SOAP envelope and package wrapper nesting depth.
+
+    Returns None if no <workflow> element is found (SOAP fault, empty response, etc.).
+    """
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        log.error("Failed to parse workflow detail XML for %s: %s", internal_name, exc)
+        return None
+
+    log.info("parse_workflow_detail %s — root tag: %s, first 500: %s",
+             internal_name, root.tag, xml_text[:500])
+
+    # Check for SOAP fault first
+    fault = parse_fault(xml_text)
+    if fault:
+        log.error("parse_workflow_detail %s — SOAP fault: %s", internal_name, fault)
+        return None
+
+    workflow_el = None
+    for el in root.iter():
+        if _local(el.tag) == "workflow":
+            workflow_el = el
+            break
+
+    if workflow_el is None:
+        log.warning("No <workflow> element in response for %s — full body: %s",
+                    internal_name, xml_text[:2000])
+        return None
+
+    # mData path: activities may be serialized inside a <data> child element.
+    # If <activities> is not a direct child, check if <data> contains the workflow XML.
+    data_el = _first_child(workflow_el, "data")
+    if data_el is not None and data_el.text and data_el.text.strip():
+        log.info("parse_workflow_detail %s — found <data> child, re-parsing inner XML", internal_name)
+        try:
+            inner = ET.fromstring(data_el.text.strip())
+            # inner might be <workflow ...> directly or <activities ...> directly
+            if _local(inner.tag) == "workflow":
+                workflow_el = inner
+            elif _local(inner.tag) == "activities":
+                # wrap it so the rest of the parser works uniformly
+                wrapper = ET.Element("workflow")
+                wrapper.set("internalName", internal_name)
+                wrapper.append(inner)
+                workflow_el = wrapper
+        except ET.ParseError as exc:
+            log.warning("parse_workflow_detail %s — <data> inner XML parse failed: %s", internal_name, exc)
+
+    activities_el = _first_child(workflow_el, "activities")
+    variables_el = _first_child(workflow_el, "variables")
+    desc_el = _first_child(workflow_el, "desc")
+    folder_el = _first_child(workflow_el, "folder")
+
+    activities = []
+    if activities_el is not None:
+        for act in activities_el:
+            activities.append(_parse_activity(act))
+        log.info("parse_workflow_detail %s — parsed %d activities", internal_name, len(activities))
+    else:
+        log.warning("parse_workflow_detail %s — no <activities> element found; "
+                    "workflow_el children: %s",
+                    internal_name,
+                    [_local(c.tag) for c in workflow_el])
+
+    return {
+        "internalName": workflow_el.get("internalName", internal_name),
+        "label": workflow_el.get("label", "") or workflow_el.get("_cs", "") or internal_name,
+        "folder": folder_el.get("name", "") if folder_el is not None else workflow_el.get("folder-label", ""),
+        "status": workflow_el.get("status", ""),
+        "description": (desc_el.text or "").strip() if desc_el is not None else "",
+        "attributes": dict(workflow_el.attrib),
+        "activities": activities,
+        "edges": _parse_edges(activities),
+        "variables_xml": ET.tostring(variables_el, encoding="unicode") if variables_el is not None else "",
+        "raw_xml": ET.tostring(workflow_el, encoding="unicode"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 

@@ -5,6 +5,7 @@ import MigrationTypePage from './pages/MigrationTypePage'
 import MigrationSelectPage from './pages/MigrationSelectPage'
 import MigrationRunPage from './pages/MigrationRunPage'
 import TemplateMigrationPage from './pages/TemplateMigrationPage'
+import WorkflowExtractionPage from './pages/WorkflowExtractionPage'
 import { useConfigStore } from './store/configStore'
 
 const TemplateAnalysisPage = React.lazy(() => import('./pages/TemplateAnalysisPage'))
@@ -33,6 +34,11 @@ export default function App() {
         <Route path="/migration/run" element={
           <ProtectedRoute condition={accConnected && ajoConnected}>
             <MigrationRunPage />
+          </ProtectedRoute>
+        } />
+        <Route path="/migration/workflow" element={
+          <ProtectedRoute condition={accConnected && ajoConnected}>
+            <WorkflowExtractionPage />
           </ProtectedRoute>
         } />
         <Route path="/migration/template" element={

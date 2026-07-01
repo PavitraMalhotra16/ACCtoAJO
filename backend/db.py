@@ -188,6 +188,41 @@ class AccTemplateParsed(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class AccWorkflowRaw(Base):
+    """Stores the raw workflow XML exactly as returned from ACC SOAP API."""
+    __tablename__ = "acc_workflow_raw"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    login_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    internal_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    label: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    raw_xml: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class AccWorkflowParsed(Base):
+    """Stores the parsed JSON extracted from the raw workflow XML."""
+    __tablename__ = "acc_workflow_parsed"
+    __table_args__ = (
+        UniqueConstraint("login_id", "internal_name", name="uq_workflow_parsed_login_internal"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    login_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    internal_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    label: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    workflow_data: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
+    # AJO migration result
+    ajo_campaign_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ajo_version_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ajo_workflow_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    migration_status: Mapped[str | None] = mapped_column(String(50), nullable=True)  # SUCCESS | FAILED | SKIPPED
+    migration_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    migrated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 log = logging.getLogger("acc_backend.db")
 
 _MANAGED_TABLES = {"source_connections", "destination_connections"}

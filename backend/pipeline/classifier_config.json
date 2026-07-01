@@ -1,0 +1,70 @@
+{
+  "models": [
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite"
+  ],
+
+  "classifications": {
+    "orchestrated_campaign": {
+      "label": "Orchestrated Campaign",
+      "description": "Batch/multi-step campaign workflows scheduled to run on a population. These map to AJO Orchestrated Campaigns.",
+      "indicators": [
+        "Has a query or readAudience activity (batch audience selection)",
+        "Has enrichment, deduplication, union, intersection, exclusion, or reconciliation activities",
+        "Has split activity for audience branching",
+        "Has a delivery or channelAction activity (email, SMS, push, direct mail)",
+        "Has join/andJoin activity for merging branches",
+        "Has fork activity for splitting execution paths",
+        "Has wait or scheduler activity (time-based flow control)",
+        "Runs on a schedule or processes a batch population"
+      ],
+      "activity_types": [
+        "query", "readAudience", "saveAudience",
+        "enrichment", "deduplication", "reconciliation",
+        "union", "intersection", "exclusion", "combine",
+        "split",
+        "delivery", "channelAction", "notification", "mobileApp",
+        "join", "andJoin", "fork",
+        "wait", "scheduler",
+        "changeData", "updateData", "changeDimension"
+      ]
+    },
+    "journey": {
+      "label": "Journey",
+      "description": "Event-driven / 1:1 real-time workflows triggered by individual profile signals. These map to AJO Journeys, not Orchestrated Campaigns.",
+      "indicators": [
+        "Triggered by a real-time signal or external event (signal activity)",
+        "Very few activities — typically start → wait/action → end with no audience building",
+        "No batch audience-building activities (no query, enrichment, deduplication)",
+        "Designed for real-time individual profile triggers, not a batch population"
+      ],
+      "activity_types": ["signal", "externalSignal"]
+    },
+    "unsupported": {
+      "label": "Unsupported",
+      "description": "Workflows that cannot be migrated to AJO due to unsupported activity types or operations.",
+      "indicators": [
+        "Contains file operations: fileImport, fileExport, writer, extract, fileCollector",
+        "Contains scripting or custom code: javascript, execJs, wfMgt",
+        "Contains server or transfer operations: nlserver, transfer, ftp, sftp",
+        "Contains approval, alert, or manual task activities",
+        "Contains web download or HTTP call activities: webDownload, httpRequest"
+      ],
+      "activity_types": [
+        "fileImport", "fileExport", "writer", "extract", "fileCollector",
+        "javascript", "execJs", "wfMgt",
+        "nlserver", "transfer", "ftp", "sftp",
+        "approval", "alert", "task",
+        "webDownload", "httpRequest",
+        "subscription", "unsubscription"
+      ]
+    }
+  },
+
+  "prompt": {
+    "system": "You are an expert in Adobe Campaign Classic (ACC) and Adobe Journey Optimizer (AJO).\nYour task is to classify an ACC workflow into exactly one of these categories:\n\n{classification_rules}\n\nRespond ONLY with a valid JSON object in this exact format:\n{\"classification\": \"<orchestrated_campaign|journey|unsupported>\", \"reason\": \"<one sentence explanation>\"}",
+    "user_template": "Workflow name: {workflow_name}\nActivities ({activity_count}):\n{activities}\n\nEdges ({edge_count}):\n{edges}"
+  }
+}
