@@ -16,7 +16,7 @@ class PipelineStep:
 # Phase 3 (AJOpart) steps 6-14 push the relational schema into AEP / AJO:
 #   PASS 1 (per schema)  : NORMALIZE_INPUT → DUPLICATE_CHECK → CREATE_SCHEMA →
 #                          PRIMARY_KEY/VERSION/TIMESTAMP/IDENTITY descriptors
-#   PASS 2 (after all)   : RELATIONSHIP_DESCRIPTORS → VERIFY
+#   PASS 2 (after all)   : RELATIONSHIP_DESCRIPTORS → CREATE_DATASET → VERIFY → VALIDATE_OC → ENABLE_OC
 PIPELINE_STEPS: list[PipelineStep] = [
     PipelineStep(
         name="LOAD_JSON",
@@ -100,10 +100,31 @@ PIPELINE_STEPS: list[PipelineStep] = [
         phase=2,
     ),
     PipelineStep(
+        name="CREATE_DATASET",
+        label="Create dataset in AEP Catalog",
+        handler="pipeline.handlers.create_dataset",
+        order=14,
+        phase=2,
+    ),
+    PipelineStep(
         name="VERIFY",
         label="Verify schema & descriptors in AEP",
         handler="pipeline.handlers.verify",
-        order=14,
+        order=15,
+        phase=2,
+    ),
+    PipelineStep(
+        name="VALIDATE_OC",
+        label="Check OC eligibility",
+        handler="pipeline.handlers.validate_oc",
+        order=16,
+        phase=2,
+    ),
+    PipelineStep(
+        name="ENABLE_OC",
+        label="Enable for Orchestrated Campaigns",
+        handler="pipeline.handlers.enable_oc",
+        order=17,
         phase=2,
     ),
 ]

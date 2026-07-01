@@ -10,7 +10,7 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import DestinationConnection, SourceConnection, UserSession, get_db
@@ -99,6 +99,12 @@ async def ajo_connect(
     # Derive tenant ID once at connect time — no repeated API calls needed
     tenant_id = "_" + body.org_id.split("@")[0].lower()
 
+    # Deauthenticate any other org's rows so only one connection is ever active.
+    await db.execute(
+        update(DestinationConnection)
+        .where(DestinationConnection.org_id != body.org_id)
+        .values(authenticated=False)
+    )
     if conn:
         conn.client_id = body.client_id
         conn.tenant_id = tenant_id
@@ -146,7 +152,10 @@ async def connections_status(
         src = result.scalar_one_or_none()
         if src:
             result = await db.execute(
-                select(DestinationConnection).where(DestinationConnection.authenticated == True)
+                select(DestinationConnection)
+                .where(DestinationConnection.authenticated == True)
+                .order_by(DestinationConnection.last_authenticated_at.desc())
+                .limit(1)
             )
             dst = result.scalar_one_or_none()
 
@@ -345,7 +354,10 @@ async def ajo_status(
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(DestinationConnection).where(DestinationConnection.authenticated == True)
+        select(DestinationConnection)
+        .where(DestinationConnection.authenticated == True)
+        .order_by(DestinationConnection.last_authenticated_at.desc())
+        .limit(1)
     )
     dst = result.scalar_one_or_none()
     return {

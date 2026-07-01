@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -533,6 +534,16 @@ async def build_payload(ctx: dict, data: dict) -> dict:
     # F. versionField — datetime/numeric, not in primaryKey
     version_field = _compute_version_field(attributes, primary_key, xdm_types)
 
+    # For time-series schemas where the only datetime field is the PK (e.g. deliveryStatus),
+    # AEP requires xdm:descriptorVersion on a DIFFERENT field from xdm:descriptorPrimaryKey
+    # (XDM-1855). Inject a synthetic integer field "_recordVersion" so both descriptors can coexist.
+    if version_field is None and behavior == "time-series":
+        _SYNTHETIC_VERSION = "_recordVersion"
+        attributes = list(attributes) + [{"name": _SYNTHETIC_VERSION, "label": "Record Version", "xdmType": "integer"}]
+        xdm_types = {**xdm_types, _SYNTHETIC_VERSION: "integer"}
+        version_field = _SYNTHETIC_VERSION
+        log.info("Schema %s: injected synthetic '%s' field for version descriptor", schema_name, _SYNTHETIC_VERSION)
+
     # H. identityField — single field name, simple precedence
     identity_field = _compute_identity_field(attributes, primary_key, xdm_types)
 
@@ -608,9 +619,25 @@ async def _resolve_aep_auth(ctx: dict) -> dict:
         if not dest or not dest.authenticated:
             raise ValueError("AJO is not connected — connect AJO before pushing schemas")
         token = await get_valid_access_token(dest, db)
+
+        # client_id column may be NULL on rows created before that column existed.
+        # The authoritative value is always the first segment of encrypted_credentials.
+        api_key = dest.client_id
+        if not api_key and dest.encrypted_credentials:
+            try:
+                raw = decrypt(dest.encrypted_credentials)
+                api_key = raw.split(":", 1)[0]
+                # Backfill the column so future calls don't need to decrypt again.
+                dest.client_id = api_key
+                await db.commit()
+            except Exception:
+                pass
+
+        log.info("AEP auth resolved — org=%s api_key_present=%s api_key_value=%r sandbox=%s",
+                 dest.org_id, bool(api_key), api_key, dest.sandbox_name)
         return {
             "access_token": token,
-            "api_key": dest.client_id,
+            "api_key": api_key,
             "org_id": dest.org_id,
             "sandbox": dest.sandbox_name.strip(),
             "tenant_id": dest.tenant_id,
@@ -631,8 +658,10 @@ def _headers(auth: dict, content_type: bool = True) -> dict:
 
 # ── small builders / matchers ────────────────────────────────────────────────
 def _push_title(ctx: dict, payload: dict) -> str:
-    # Authoritative title = ACC namespace:name (spec §4 dedup + relationship key).
-    return ctx.get("schema_name") or payload.get("title") or ""
+    # Schema title in AJO uses the same PascalCase notation as the dataset name:
+    # hdbk:deliveryStatus → HdbkDeliveryStatus (no colon, namespace + schema both capitalized).
+    schema_name = ctx.get("schema_name") or payload.get("title") or ""
+    return _dataset_name(schema_name) if schema_name else ""
 
 
 def _field_to_property(field: dict, is_primary: bool) -> dict:
@@ -900,6 +929,11 @@ async def create_schema(ctx: dict, data: dict) -> dict:
                 )
 
             primary_key = set(payload.get("primaryKey") or [])
+            desired_names = {f["name"] for f in payload.get("fields", []) if f.get("name")}
+            log.info("Schema %s sync — existing fields: %s", schema_id, sorted(existing_names))
+            log.info("Schema %s sync — desired fields:  %s", schema_id, sorted(desired_names))
+            log.info("Schema %s sync — to remove: %s", schema_id,
+                     sorted(existing_names - desired_names - primary_key))
             prop_ops: list[dict] = []   # add new fields
             req_ops: list[dict] = []    # add fields to required (separate call — idempotent)
             seen_req: set[str] = set()  # dedup within this batch
@@ -918,28 +952,98 @@ async def create_schema(ctx: dict, data: dict) -> dict:
                         seen_req.add(name)
                 else:
                     # Existing field: ensure PK/required fields are in required[].
-                    # We send this as a separate PATCH and ignore uniqueItems errors
-                    # because xed-full+json (used for GET) has a different structure
-                    # than the non-full format (used for PATCH), making it unreliable
-                    # to read the live required array from the GET response.
                     if (field.get("required") or name in primary_key) and name not in seen_req:
                         req_ops.append({"op": "add", "path": "/definitions/customFields/required/-", "value": name})
                         seen_req.add(name)
-                    # Type diff warning — never retype an existing field.
+                    # Type changed — remove the old field and re-add with the new type.
+                    # PK fields are protected: removing them would break the schema.
                     desired_tf = (field.get("type"), field.get("format"))
                     existing_tf = existing_types.get(name)
                     if existing_tf and existing_tf[0] is not None and existing_tf != desired_tf:
-                        warnings.append(
-                            f"Field '{name}' type mismatch: AEP has {existing_tf[0]!r}"
-                            f"{'/' + existing_tf[1] if existing_tf[1] else ''}, enriched JSON wants "
-                            f"{desired_tf[0]!r}{'/' + desired_tf[1] if desired_tf[1] else ''}. Existing field left unchanged."
-                        )
+                        if name in primary_key:
+                            warnings.append(
+                                f"Field '{name}' type mismatch (AEP: {existing_tf[0]!r}, desired: {desired_tf[0]!r}) "
+                                f"— skipped because it is a primary key field."
+                            )
+                        else:
+                            # Remove then re-add: only works on customFields properties.
+                            cf_props = (
+                                (existing.get("definitions", {}).get("customFields") or {})
+                                .get("properties", {})
+                            )
+                            if name in cf_props:
+                                prop_ops.append({
+                                    "op": "remove",
+                                    "path": f"/definitions/customFields/properties/{name}",
+                                })
+                                prop_ops.append({
+                                    "op": "add",
+                                    "path": f"/definitions/customFields/properties/{name}",
+                                    "value": _field_to_property(field, False),
+                                })
+                                log.info("Schema %s field '%s': retyping %r → %r (remove + add)",
+                                         schema_id, name, existing_tf, desired_tf)
+                            else:
+                                warnings.append(
+                                    f"Field '{name}' type mismatch but not in customFields — left unchanged."
+                                )
+
+            # Remove fields that exist in AEP but are absent from the enriched JSON,
+            # unless they are primary-key fields (AEP forbids removing those).
+            # Note: xed-full+json flattens customFields into top-level properties,
+            # so we cannot reliably distinguish customFields from inherited fields
+            # via the GET response. We attempt removal for all non-PK removable
+            # fields and ignore 422/400 errors for fields we don't own.
+            removable = existing_names - desired_names - primary_key
+            remove_ops: list[dict] = [
+                {"op": "remove", "path": f"/definitions/customFields/properties/{name}"}
+                for name in removable
+            ]
 
             if prop_ops:
                 await aep_client.patch_tenant_schema(client, headers, schema_id, prop_ops)
                 data["changesMade"] = data.get("changesMade", 0) + len(prop_ops)
+                data["fieldsChanged"] = data.get("fieldsChanged", 0) + len(prop_ops)
                 log.info("Patched schema %s — added %d field(s)", schema_id, len(prop_ops))
-            else:
+
+            removed_count = 0
+            deprecated_count = 0
+            for op in remove_ops:
+                field_name = op["path"].split("/")[-1]
+                try:
+                    await aep_client.patch_tenant_schema(client, headers, schema_id, [op])
+                    removed_count += 1
+                    log.info("Patched schema %s — removed field %s", schema_id, field_name)
+                except RuntimeError as e:
+                    msg = str(e)
+                    if "400" in msg or "422" in msg or "not found" in msg.lower():
+                        # Field removal is a breaking change — AEP blocks it once a schema
+                        # has a linked dataset. Mark as deprecated instead so consumers
+                        # can treat it as soft-deleted without breaking ingestion.
+                        try:
+                            dep_created = await _create_descriptor(client, headers, {
+                                "@type": "xdm:descriptorDeprecated",
+                                "xdm:sourceSchema": schema_id,
+                                "xdm:sourceVersion": 1,
+                                "xdm:sourceProperty": f"/{field_name}",
+                            })
+                            if dep_created:
+                                deprecated_count += 1
+                                log.info("Schema %s field %r deprecated (removal blocked by AEP — schema has linked data)", schema_id, field_name)
+                                data.setdefault("warnings", []).append(
+                                    f"Field '{field_name}' could not be removed (AEP blocks breaking changes on in-use schemas) — marked as deprecated instead."
+                                )
+                            else:
+                                log.info("Schema %s field %r already deprecated", schema_id, field_name)
+                        except RuntimeError:
+                            log.info("Schema %s field %r could not be removed or deprecated — skipped", schema_id, field_name)
+                    else:
+                        raise
+            if removed_count or deprecated_count:
+                data["changesMade"] = data.get("changesMade", 0) + removed_count + deprecated_count
+                data["fieldsChanged"] = data.get("fieldsChanged", 0) + removed_count + deprecated_count
+
+            if not prop_ops and not removed_count:
                 log.info("Schema %s fields already match enriched JSON", schema_id)
 
             for req_op in req_ops:
@@ -1164,7 +1268,116 @@ async def relationship_descriptors(ctx: dict, data: dict) -> dict:
     return data
 
 
-# ── Step 14: VERIFY ──────────────────────────────────────────────────────────
+def _dataset_name(schema_name: str) -> str:
+    """hdbk:orderHistory → HdbkOrderHistory (PascalCase, no colon)."""
+    parts = schema_name.split(":", 1)
+    if len(parts) == 2:
+        ns, name = parts
+        return (ns[0].upper() + ns[1:]) + (name[0].upper() + name[1:])
+    return schema_name[0].upper() + schema_name[1:]
+
+
+def _pick_version_field_fallback(payload: dict) -> str | None:
+    """Find any field eligible for a version descriptor.
+
+    Tries the normal logic first (non-PK datetime/numeric), then falls back to
+    PK datetime fields — needed for time-series schemas where the only datetime
+    field is also the primary key. AEP rejects dataset creation without one.
+    """
+    fields = payload.get("fields", [])
+    xdm_types = {f["name"]: f.get("type") for f in fields if f.get("name")}
+    primary_key = set(payload.get("primaryKey") or [])
+
+    # Prefer normal (non-PK) version field
+    normal = _compute_version_field(
+        [{"name": n} for n in xdm_types], list(primary_key), xdm_types
+    )
+    if normal:
+        return normal
+
+    # Last resort: use a PK datetime field (common on time-series schemas)
+    _NUMERIC = {"integer", "number"}
+    for field in fields:
+        name = field.get("name")
+        t = field.get("type")
+        fmt = field.get("format", "")
+        if not name:
+            continue
+        if t in _NUMERIC or (t == "string" and fmt == "date-time"):
+            return name
+
+    return None
+
+
+# ── Step 14: CREATE_DATASET ──────────────────────────────────────────────────
+async def create_dataset(ctx: dict, data: dict) -> dict:
+    """Create an AEP Catalog dataset backed by the just-pushed schema.
+    Idempotent: if data already carries aepDatasetId (from a resume snapshot), skip."""
+    if data.get("aepDatasetId"):
+        log.info("Dataset already created for %s (%s) — skipping", ctx.get("schema_name"), data["aepDatasetId"])
+        return data
+
+    schema_id = data.get("aepSchemaId")
+    if not schema_id:
+        raise ValueError("aepSchemaId not set — cannot create dataset without a schema $id")
+
+    payload = data.get("ajoPayload", {})
+    schema_name = ctx.get("schema_name", "")
+    dataset_name = _dataset_name(schema_name) if schema_name else (data.get("pushTitle") or _push_title(ctx, payload))
+    auth = await _resolve_aep_auth(ctx)
+    headers = _headers(auth)
+    headers_get = _headers(auth, content_type=False)
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        # Check if a dataset already exists for this schema.
+        existing_datasets = await aep_client.list_datasets_for_schema(client, headers_get, schema_id)
+        if existing_datasets:
+            existing_id = existing_datasets[0].get("id") or existing_datasets[0].get("@/dataSets")
+            data["aepDatasetId"] = existing_id
+            data["datasetCreated"] = False
+            log.info("Dataset already exists for schema %s (%s) — skipping creation", schema_id, existing_id)
+            return data
+
+        # AEP requires an adhoc-v2 schema to have a version descriptor before a
+        # dataset can be created. Ensure one exists; create it if missing.
+        existing_descriptors = await _fetch_descriptors(client, headers_get, schema_id)
+        has_version = _has_descriptor(existing_descriptors, schema_id, "xdm:descriptorVersion")
+        if not has_version:
+            version_field = _pick_version_field_fallback(payload)
+            if version_field:
+                created = await _create_descriptor(client, headers, {
+                    "@type": "xdm:descriptorVersion",
+                    "xdm:sourceSchema": schema_id,
+                    "xdm:sourceVersion": 1,
+                    "xdm:sourceProperty": f"/{version_field}",
+                })
+                if created:
+                    has_version = True
+                    data["changesMade"] = data.get("changesMade", 0) + 1
+                    log.info("Added missing version descriptor on %r (field=%s) before dataset create", dataset_name, version_field)
+                else:
+                    # Descriptor already exists (returned False = already present)
+                    has_version = True
+            else:
+                log.warning("No eligible version field for %r — skipping dataset creation", dataset_name)
+
+        if not has_version:
+            data["datasetCreated"] = False
+            data["warnings"] = data.get("warnings", []) + [
+                f"Dataset not created: schema requires a version descriptor but no eligible field exists "
+                f"(all datetime/numeric fields are primary keys)."
+            ]
+            return data
+
+        dataset_id = await aep_client.create_dataset(client, headers, dataset_name, schema_id)
+
+    data["aepDatasetId"] = dataset_id
+    data["datasetCreated"] = True
+    data["changesMade"] = data.get("changesMade", 0) + 1
+    log.info("Created dataset %s (%s) for schema %s", dataset_name, dataset_id, schema_id)
+    return data
+
+
+# ── Step 15: VERIFY ──────────────────────────────────────────────────────────
 async def verify(ctx: dict, data: dict) -> dict:
     payload = data["ajoPayload"]
     title = data.get("pushTitle") or _push_title(ctx, payload)
@@ -1187,11 +1400,110 @@ async def verify(ctx: dict, data: dict) -> dict:
         "schema": True,
         "primaryKey": "xdm:descriptorPrimaryKey" in types,
         "relationships": sum(1 for d in mine if d.get("@type") == "xdm:descriptorRelationship"),
+        "datasetId": data.get("aepDatasetId"),
         "warnings": len(warnings),
     }
     if warnings:
         log.warning("Schema %s completed with %d warning(s): %s", title, len(warnings), "; ".join(warnings))
     log.info("Verified %s: %s", title, data["verification"])
+    return data
+
+
+# ── OC background poller ─────────────────────────────────────────────────────
+async def _poll_oc_job(job_id: str, item_id: str, ctx: dict) -> None:
+    """Detached asyncio task: poll OC job until terminal state, then write to DB."""
+    auth = await _resolve_aep_auth(ctx)
+    headers = _headers(auth, content_type=False)
+    max_attempts = 24
+    for attempt in range(max_attempts):
+        await asyncio.sleep(5)
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                result = await aep_client.get_oc_enablement_job_status(client, headers, job_id)
+            status = (result.get("status") or "PENDING").upper()
+            if status not in ("PENDING", "IN_PROGRESS"):
+                final = "ENABLED" if status in ("COMPLETED", "SUCCESS", "ENABLED") else "FAILED"
+                from pipeline.runner import _update_item  # local import to avoid circular
+                await _update_item(item_id, "COMPLETED", "ENABLE_OC", 17, oc_status=final)
+                log.info("OC job %s for item %s finished: %s", job_id, item_id, final)
+                return
+        except Exception as exc:
+            log.warning("OC job poll attempt %d failed for %s: %s", attempt + 1, job_id, exc)
+    log.warning("OC job %s for item %s timed out after %ds — leaving status PENDING", job_id, item_id, max_attempts * 5)
+
+
+# ── Step 16: VALIDATE_OC ─────────────────────────────────────────────────────
+async def validate_oc(ctx: dict, data: dict) -> dict:
+    """Call OC Modeler to check whether this schema's dataset is OC-eligible."""
+    dataset_id = data.get("aepDatasetId")
+    if not dataset_id:
+        log.warning("VALIDATE_OC: no dataset ID available for %s — skipping", ctx.get("schema_name"))
+        data["ocSupported"] = False
+        data["ocNotSupportedReason"] = "No dataset associated with this schema"
+        return data
+
+    auth = await _resolve_aep_auth(ctx)
+    headers = _headers(auth, content_type=False)
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            result = await aep_client.validate_oc_extension(client, headers, dataset_id)
+
+        if result.get("_httpStatus") == 400:
+            error_code = result.get("errorCode", "")
+            error_msg = result.get("errorMessage", "")
+            if error_code == "CJMDMS-100169-400":
+                # OC extension is already enabled on this dataset — treat as ENABLED
+                data["ocSupported"] = True
+                data["ocAlreadyEnabled"] = True
+                log.info("OC validation for %s: already enabled (CJMDMS-100169-400)", ctx.get("schema_name"))
+            else:
+                # Genuine ineligibility (e.g. time-series schema, missing primary key)
+                data["ocSupported"] = False
+                data["ocNotSupportedReason"] = error_msg or f"Not eligible ({error_code})"
+                log.info("OC validation for %s: not eligible — %s: %s", ctx.get("schema_name"), error_code, error_msg)
+        else:
+            supported = bool(result.get("extensionSupported", False))
+            reason = result.get("reason") or result.get("message") or ""
+            data["ocSupported"] = supported
+            data["ocNotSupportedReason"] = reason if not supported else None
+            log.info("OC validation for %s: supported=%s reason=%r", ctx.get("schema_name"), supported, reason)
+    except Exception as exc:
+        log.warning("VALIDATE_OC: API call failed for %s (%s) — treating as not eligible", ctx.get("schema_name"), exc)
+        data["ocSupported"] = False
+        data["ocNotSupportedReason"] = "OC validation API unavailable"
+    return data
+
+
+# ── Step 17: ENABLE_OC ───────────────────────────────────────────────────────
+async def enable_oc(ctx: dict, data: dict) -> dict:
+    """Fire OC enablement job; spawn background poller to track result."""
+    if not data.get("ocSupported"):
+        log.info("OC enablement skipped for %s (not eligible)", ctx.get("schema_name"))
+        return data
+    if data.get("ocAlreadyEnabled"):
+        log.info("OC enablement skipped for %s (already enabled)", ctx.get("schema_name"))
+        return data
+
+    dataset_id = data.get("aepDatasetId")
+    if not dataset_id:
+        log.warning("ENABLE_OC: no dataset ID for %s — skipping", ctx.get("schema_name"))
+        return data
+
+    auth = await _resolve_aep_auth(ctx)
+    headers = _headers(auth)
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            result = await aep_client.enable_oc_extension(client, headers, dataset_id)
+        # Response is a list: [{"jobId": "...", "datasetId": "...", ...}]
+        first = result[0] if isinstance(result, list) and result else (result if isinstance(result, dict) else {})
+        job_id = first.get("jobId") or first.get("id") or ""
+        if not job_id:
+            log.warning("ENABLE_OC: enablement API returned no job ID for %s", ctx.get("schema_name"))
+            return data
+        data["ocJobId"] = job_id
+        log.info("OC enablement job %s fired for %s", job_id, ctx.get("schema_name"))
+    except Exception as exc:
+        log.warning("ENABLE_OC: API call failed for %s (%s) — OC enablement skipped", ctx.get("schema_name"), exc)
     return data
 
 

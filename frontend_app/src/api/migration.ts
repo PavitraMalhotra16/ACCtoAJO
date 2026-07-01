@@ -8,6 +8,10 @@ export interface MigrationSchemaItem {
   error_message: string | null
   warnings?: string[]
   fields_added?: number
+  oc_supported?: boolean | null
+  oc_not_supported_reason?: string | null
+  oc_job_id?: string | null
+  oc_status?: 'ENABLED' | 'PENDING' | 'NOT_ELIGIBLE' | 'FAILED' | null
   created_at: string
   completed_at: string | null
 }

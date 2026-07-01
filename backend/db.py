@@ -95,6 +95,11 @@ class SchemaJobItem(Base):
     current_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     fields_added: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    aep_dataset_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    oc_supported: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    oc_not_supported_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    oc_job_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    oc_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -293,12 +298,14 @@ async def init_db():
             "ALTER TABLE source_connections ADD COLUMN IF NOT EXISTS encrypted_credentials TEXT",
             "ALTER TABLE source_connections ADD COLUMN IF NOT EXISTS encrypted_access_token TEXT",
             "ALTER TABLE source_connections ADD COLUMN IF NOT EXISTS token_expires_at TIMESTAMPTZ",
-            "ALTER TABLE acc_workflow_parsed ADD COLUMN IF NOT EXISTS ajo_campaign_id VARCHAR(255)",
-            "ALTER TABLE acc_workflow_parsed ADD COLUMN IF NOT EXISTS ajo_version_id VARCHAR(255)",
-            "ALTER TABLE acc_workflow_parsed ADD COLUMN IF NOT EXISTS ajo_workflow_id VARCHAR(255)",
-            "ALTER TABLE acc_workflow_parsed ADD COLUMN IF NOT EXISTS migration_status VARCHAR(50)",
-            "ALTER TABLE acc_workflow_parsed ADD COLUMN IF NOT EXISTS migration_error TEXT",
-            "ALTER TABLE acc_workflow_parsed ADD COLUMN IF NOT EXISTS migrated_at TIMESTAMPTZ",
+            "ALTER TABLE schema_job_items ADD COLUMN IF NOT EXISTS aep_dataset_id VARCHAR(255)",
+            "ALTER TABLE schema_job_items ADD COLUMN IF NOT EXISTS oc_supported BOOLEAN",
+            "ALTER TABLE schema_job_items ADD COLUMN IF NOT EXISTS oc_not_supported_reason TEXT",
+            "ALTER TABLE schema_job_items ADD COLUMN IF NOT EXISTS oc_job_id VARCHAR(255)",
+            "ALTER TABLE schema_job_items ADD COLUMN IF NOT EXISTS oc_status VARCHAR(50)",
+            "ALTER TABLE tenant_config ADD COLUMN IF NOT EXISTS namespaces_json TEXT",
+            "ALTER TABLE tenant_config ADD COLUMN IF NOT EXISTS sandbox_id VARCHAR(255)",
+            "ALTER TABLE tenant_config ADD COLUMN IF NOT EXISTS sandbox_type VARCHAR(100)",
         ]:
             try:
                 await conn.execute(__import__("sqlalchemy").text(stmt))
